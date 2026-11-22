@@ -1,3 +1,12 @@
+> [!NOTE]
+> **二开说明（基于 [daoif/tokless](https://github.com/daoif/tokless) `v0.4.1`）**
+>
+> 本分支（`fix/java-and-iife-skeleton`）针对企业级 Java 后端与传统 IIFE 前端 JS 项目的骨架提取盲区进行了增强与修复：
+> 1. **Java 嵌套类边界栈修复**（`tools/repo-skeleton/lib/skeleton.js`）：将单变量类边界升级为 `classStack` 嵌套栈，解决类内包含静态内部类时外层类后续方法全部漏检的问题，并补齐 `record` 与多行 `throws` 支持。
+> 2. **Java 复杂返回类型与注解兼容**：扩展方法声明识别，支持内部类点号类型（如 `Result.Obj<T>`）、多参数泛型（如 `Map<String, Object>`）、通配符（如 `Result<?>`）及行内注解（如 `@Override public ...`），同时排除字段匿名类赋值误判。
+> 3. **传统 IIFE 前端 JS 支持**：新增顶层 IIFE 包装识别（`(function(...) { ... })`、`!function`、`(() => { ... })()`），自动下潜一层作用域提取内部函数、箭头函数与类，避免老项目公共 JS 骨架扫空，且不影响普通顶层函数。
+> 4. **回归单测覆盖**（`tests/java-and-iife-skeleton.test.js`）：补充上述 Java 与 IIFE JS 场景的自动化测试并接入 `npm test`。
+
 <p align="left">
   <img src="./assets/logo.svg" width="60" height="60" alt="Tokless Logo" />
 </p>
