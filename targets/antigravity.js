@@ -13,7 +13,32 @@ const {
 
 const PLUGIN_NAME = 'agy-tokless';
 const ROOT_FILES = ['plugin.json', 'hooks.json', 'package.json', 'index.js', 'README.md', 'LICENSE'];
-const LINK_DIRS = ['rules', 'skills', 'agents', 'scripts', 'tools', 'lib'];
+const LINK_DIRS = ['rules', 'skills', 'agents', 'scripts', 'tools', 'lib', 'sidecars'];
+
+/**
+ * 将已安装 sidecars 目录下各 sidecar.json 中的 `"command": "node"` 替换为当前绝对 node 路径
+ * — 为什么这么写 —
+ * Antigravity 拉起 sidecar 子进程时在 Windows/GUI 环境下可能缺少用户 PATH 中的 node，
+ * 写入绝对路径（不加 shell 引号，因 sidecar 使用 execFile/spawn 直接启动可执行文件）可确保 100% 拉起成功。
+ */
+function patchInstalledSidecarsNodeBinary(sidecarsDir) {
+  if (!fs.existsSync(sidecarsDir)) return;
+  const nodeBin = resolveNodeBinary();
+  for (const entry of fs.readdirSync(sidecarsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const cfgPath = path.join(sidecarsDir, entry.name, 'sidecar.json');
+    if (!fs.existsSync(cfgPath)) continue;
+    try {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      if (cfg && cfg.command === 'node') {
+        cfg.command = nodeBin;
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + '\n', 'utf8');
+      }
+    } catch (_) {
+      // 忽略异常，保留原文件
+    }
+  }
+}
 
 function installHooksJson(srcFile, destFile) {
   try {
@@ -81,15 +106,18 @@ function install(options = {}) {
 
   const dirModes = {};
   for (const dirName of LINK_DIRS) {
+    // sidecars 目录需就地改写 sidecar.json 中的绝对 node 路径，强制走拷贝模式避免污染源仓
+    const dirForceCopy = forceCopy || dirName === 'sidecars';
     const mode = linkOrCopyDir(
       path.join(sourceDir, dirName),
       path.join(targetDir, dirName),
-      forceCopy
+      dirForceCopy
     );
     if (mode !== 'skipped') {
       dirModes[dirName] = mode;
     }
   }
+  patchInstalledSidecarsNodeBinary(path.join(targetDir, 'sidecars'));
 
   if (!options.silent) {
     console.log('');

@@ -1,0 +1,21 @@
+{
+  "command": "node",
+  "args": ["--no-warnings", "main.mjs"],
+  "restart_policy": "always",
+  "display_name": "Tokless Monitor",
+  "description": "实时查看当前会话的上下文水位、全轮次平均缓存率、TTFT、流式生成速度与思维链占比。",
+  "has_web_ui": true,
+  "agent_permissions": {
+    "allows_user_interactions": false
+  },
+  "ui_config": {
+    "display_name": "Tokless",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "Tokless 监控"
+      }
+    ]
+  }
+}

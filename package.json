@@ -27,6 +27,7 @@
     "lib/",
     "tools/",
     "scripts/",
+    "sidecars/",
     "rules/",
     "skills/",
     "agents/",
@@ -39,7 +40,7 @@
     "uninstall-plugin": "node ./install.js --uninstall",
     "audit": "node ./tools/agy-audit/cli.js",
     "skeleton": "node ./tools/repo-skeleton/cli.js",
-    "test": "node ./tests/verify-tokless.js && node --test ./tests/cross-platform-fixes.test.js ./tests/java-and-iife-skeleton.test.js",
+    "test": "node ./tests/verify-tokless.js && node --test ./tests/cross-platform-fixes.test.js ./tests/java-and-iife-skeleton.test.js ./tests/live-monitor.test.js",
     "prepublishOnly": "npm test"
   },
   "repository": {

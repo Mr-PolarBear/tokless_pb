@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tokless 会话实时监控</title>
+  <script src="/preload.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 12px;
+      background: var(--background, #f8f7f4);
+      color: var(--foreground, #1f2328);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-variant-numeric: tabular-nums;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 700;
+      font-size: 14px;
+    }
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success, #16a34a);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--success, #16a34a) 22%, transparent);
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    select, button {
+      background: var(--card, #ffffff);
+      color: var(--foreground, #1f2328);
+      border: 1px solid var(--card-border, #e2e0da);
+      border-radius: 6px;
+      padding: 3px 8px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    button:hover { opacity: 0.85; }
+    .card {
+      background: var(--card, #ffffff);
+      border: 1px solid var(--card-border, #e2e0da);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 10px;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 8px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid var(--card-border, #e8e6e0);
+    }
+    .section-title { font-weight: 700; font-size: 13px; }
+    .muted { color: var(--muted-foreground, #6b7280); }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 4px 0;
+    }
+    .row-val { text-align: right; font-weight: 500; }
+    .badge {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      background: color-mix(in srgb, var(--success, #2a7f62) 14%, transparent);
+      color: var(--success, #2a7f62);
+      border: 1px solid color-mix(in srgb, var(--success, #2a7f62) 28%, transparent);
+    }
+    .bar-track {
+      height: 7px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--muted-foreground, #9ca3af) 20%, transparent);
+      overflow: hidden;
+    }
+    .bar-fill-warm {
+      height: 100%;
+      border-radius: 999px;
+      background: #d97757;
+      transition: width 0.3s ease;
+    }
+    .bar-fill-danger {
+      background: var(--error, #dc2626);
+    }
+    .split-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .split-track {
+      width: 96px;
+      height: 7px;
+      border-radius: 999px;
+      background: #3b7a8c;
+      overflow: hidden;
+      display: flex;
+    }
+    .split-think {
+      height: 100%;
+      background: #d97757;
+      transition: width 0.3s ease;
+    }
+    .text-warm { color: #c86443; font-weight: 600; }
+    .text-cool { color: #3b7a8c; font-weight: 600; }
+    .text-ok { color: var(--success, #2a7f62); font-weight: 600; }
+    .watermark-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px solid var(--card-border, #e8e6e0);
+    }
+    .watermark-bar { flex: 1; min-width: 72px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    th, td {
+      padding: 4px 4px;
+      text-align: right;
+      border-bottom: 1px solid var(--card-border, #efede8);
+    }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted-foreground, #6b7280); font-weight: 600; }
+    .empty {
+      padding: 24px 12px;
+      text-align: center;
+      color: var(--muted-foreground, #6b7280);
+    }
+    .foot {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--muted-foreground, #6b7280);
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="title-wrap">
+      <span class="live-dot" id="liveDot"></span>
+      <span>Tokless 会话监控</span>
+    </div>
+    <div class="controls">
+      <select id="sessionSelect" title="切换查看最近会话"></select>
+      <button id="refreshBtn" type="button">刷新</button>
+    </div>
+  </div>
+
+  <div id="content">
+    <div class="card empty">正在读取当前会话实时指标...</div>
+  </div>
+
+  <div class="foot mono">
+    <span id="metaSource">-</span>
+    <span id="metaUpdated">每 2.5s 自动刷新</span>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token') || '';
+    let activeConvId = (window.sidecar && window.sidecar.conversationId) || params.get('conversationId') || '';
+
+    function apiUrl(path, queryObj = {}) {
+      const qs = new URLSearchParams(queryObj);
+      if (token) qs.set('token', token);
+      const q = qs.toString();
+      return q ? `${path}?${q}` : path;
+    }
+
+    async function fetchJson(path, queryObj) {
+      const headers = {};
+      if (token) headers['x-sidecar-token'] = token;
+      const res = await fetch(apiUrl(path, queryObj), { headers, cache: 'no-store' });
+      return res.json();
+    }
+
+    function fmtNum(n) {
+      return Number(n || 0).toLocaleString('en-US');
+    }
+
+    function fmtCompact(n) {
+      const v = Number(n || 0);
+      const abs = Math.abs(v);
+      const sign = v < 0 ? '-' : '';
+      if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(2)}M`;
+      if (abs >= 1e3) return `${sign}${Math.round(abs / 1e3)}k`;
+      return `${v}`;
+    }
+
+    function render(metrics) {
+      const ct = metrics.currentTurn;
+      const st = metrics.sessionTotal;
+      const pct = Math.min(100, Math.max(0, Number(st.contextPct || 0)));
+      const barDanger = pct >= 85 ? ' bar-fill-danger' : '';
+
+      const speedText = ct && ct.hasExactTiming
+        ? `流式 <b>${ct.streamTokPerSec.toFixed(1)} tok/s</b> &nbsp;|&nbsp; 端到端 <b>${ct.e2eTokPerSec.toFixed(1)} tok/s</b>`
+        : `<span class="muted">等待 DB 纳秒时间戳</span>`;
+
+      const latencyText = ct && ct.hasExactTiming
+        ? `TTFT <b>${ct.ttftSec.toFixed(2)}s</b> &nbsp;|&nbsp; 流式 <b>${ct.streamSec.toFixed(2)}s</b> &nbsp;|&nbsp; 总计 <b>${ct.modelTotalSec.toFixed(2)}s</b>`
+        : `<span class="muted">等待本轮完成</span>`;
+
+      const rowsHtml = (metrics.recentTurns || []).map((t) => {
+        const deltaStr = `${t.netDeltaTokens >= 0 ? '+' : ''}${fmtCompact(t.netDeltaTokens)}`;
+        return `
+          <tr>
+            <td>#${t.turnIndex}</td>
+            <td>${fmtCompact(t.endContextTokens)}</td>
+            <td>${deltaStr}</td>
+            <td class="text-ok">${t.cacheHitPct.toFixed(1)}%</td>
+            <td>${t.streamTokPerSec > 0 ? t.streamTokPerSec.toFixed(1) : '-'}</td>
+          </tr>
+        `;
+      }).join('');
+
+      document.getElementById('content').innerHTML = `
+        <div class="card">
+          <div class="section-head">
+            <span class="section-title">当前轮次</span>
+            <span class="muted mono">第 ${ct ? ct.turnIndex : 0} 轮 &nbsp;总 ${ct ? ct.totalSteps : 0} 步 &nbsp;共耗时 ${ct ? ct.turnElapsedSec : 0}s</span>
+          </div>
+
+          <div class="row">
+            <span class="muted">生成速度</span>
+            <span class="row-val mono">${speedText}</span>
+          </div>
+          <div class="row">
+            <span class="muted">响应耗时</span>
+            <span class="row-val mono">${latencyText}</span>
+          </div>
+          <div class="row">
+            <span class="muted">本轮净增</span>
+            <span class="row-val mono">
+              <b>${ct ? ct.netDeltaFormatted : '0'}</b>
+              <span class="badge">缓存率 ${ct ? ct.turnCacheHitPct.toFixed(1) : '0.0'}%</span>
+            </span>
+          </div>
+          <div class="row">
+            <span class="muted">输出比例</span>
+            <div class="split-wrap mono">
+              <span class="text-warm">思维链 ${ct ? ct.thinkingPct : 0}%</span>
+              <div class="split-track">
+                <div class="split-think" style="width:${ct ? ct.thinkingPct : 0}%"></div>
+              </div>
+              <span class="text-cool">正文/工具 ${ct ? ct.responsePct : 0}%</span>
+            </div>
+          </div>
+
+          <div class="watermark-row">
+            <span class="section-title">会话总计</span>
+            <span class="muted mono">${st.totalTurns} 轮提问 / ${st.totalCalls} 次调用</span>
+          </div>
+
+          <div class="watermark-row" style="border-top:none;padding-top:4px;margin-top:2px;">
+            <div class="watermark-bar">
+              <div class="bar-track">
+                <div class="bar-fill-warm${barDanger}" style="width:${pct}%"></div>
+              </div>
+            </div>
+            <span class="text-warm mono">${st.currentContextFormatted}/${st.contextLimitFormatted} (${Math.round(pct)}%)</span>
+            <span class="muted">平均缓存</span>
+            <span class="text-ok mono">${st.avgCacheHitPct.toFixed(1)}%</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="section-head">
+            <span class="section-title">最近轮次趋势</span>
+            <span class="muted mono">总吞吐 ${fmtCompact(st.totalThroughputTokens)} tok</span>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>轮次</th>
+                <th>水位</th>
+                <th>净增</th>
+                <th>缓存率</th>
+                <th>tok/s</th>
+              </tr>
+            </thead>
+            <tbody class="mono">${rowsHtml || '<tr><td colspan="5" class="muted">暂无数据</td></tr>'}</tbody>
+          </table>
+        </div>
+      `;
+
+      document.getElementById('metaSource').textContent =
+        `${metrics.modelName} · ${metrics.conversationId.slice(0, 8)} (${metrics.dataSource})`;
+      document.getElementById('metaUpdated').textContent =
+        `更新于 ${new Date().toLocaleTimeString()}`;
+    }
+
+    async function loadSessions() {
+      try {
+        const res = await fetchJson('/api/sessions');
+        if (!res.ok || !Array.isArray(res.sessions)) return;
+        const sel = document.getElementById('sessionSelect');
+        const prev = activeConvId;
+        sel.innerHTML = res.sessions
+          .map((s) => `<option value="${s.id}" ${s.id === prev ? 'selected' : ''}>${s.shortId}</option>`)
+          .join('');
+        if (!activeConvId && res.sessions.length > 0) {
+          activeConvId = res.sessions[0].id;
+        }
+      } catch {}
+    }
+
+    async function refresh() {
+      try {
+        const res = await fetchJson('/api/metrics', activeConvId ? { conversationId: activeConvId } : {});
+        if (res && res.ok && res.metrics) {
+          activeConvId = res.metrics.conversationId;
+          render(res.metrics);
+        } else {
+          document.getElementById('content').innerHTML =
+            `<div class="card empty">${(res && res.error) || '暂无会话指标'}</div>`;
+        }
+      } catch (err) {
+        document.getElementById('content').innerHTML =
+          `<div class="card empty">读取失败: ${err.message}</div>`;
+      }
+    }
+
+    document.getElementById('sessionSelect').addEventListener('change', (e) => {
+      activeConvId = e.target.value;
+      refresh();
+    });
+    document.getElementById('refreshBtn').addEventListener('click', () => {
+      loadSessions().then(refresh);
+    });
+
+    loadSessions().then(refresh);
+    setInterval(refresh, 2500);
+  </script>
+</body>
+</html>
