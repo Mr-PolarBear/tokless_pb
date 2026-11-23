@@ -147,13 +147,11 @@ test('install.js copies sidecars/tokless_monitor and patches absolute node path 
     assert.notEqual(cfg.command, 'node', 'sidecar.json command should use absolute node binary');
     assert.equal(cfg.ui_config.views[0].entrypoint, 'SIDECAR_UI_ENTRYPOINT_AUX_PANE');
 
-    const hooksPath = path.join(tempHome, '.gemini', 'config', 'plugins', 'agy-tokless', 'hooks.json');
-    const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
-    const postHandler = hooks['session-summary-bar'].PostInvocation[0];
-    assert.equal(postHandler.type, 'command', 'PostInvocation must use flat handler object');
+    const rulesPath = path.join(tempHome, '.gemini', 'config', 'plugins', 'agy-tokless', 'rules', 'AGENTS.md');
+    const rulesText = fs.readFileSync(rulesPath, 'utf8');
     assert.ok(
-      !postHandler.command.startsWith('node '),
-      `expected absolute node path in PostInvocation command, got: ${postHandler.command}`
+      rulesText.includes('sidecar://agy-tokless/tokless_monitor/'),
+      'rules/AGENTS.md should expose the one-click sidecar:// monitor pill'
     );
   } finally {
     fs.rmSync(tempHome, { recursive: true, force: true });

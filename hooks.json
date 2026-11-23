@@ -13,22 +13,5 @@
         ]
       }
     ]
-  },
-  "session-summary-bar": {
-    "enabled": true,
-    "SessionStart": [
-      {
-        "type": "command",
-        "command": "node --no-warnings ./scripts/session-summary-hook.js",
-        "timeout": 5
-      }
-    ],
-    "PostInvocation": [
-      {
-        "type": "command",
-        "command": "node --no-warnings ./scripts/session-summary-hook.js",
-        "timeout": 5
-      }
-    ]
   }
 }
