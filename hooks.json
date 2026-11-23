@@ -18,13 +18,9 @@
     "enabled": true,
     "PostInvocation": [
       {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node --no-warnings ./scripts/session-summary-hook.js",
-            "timeout": 5
-          }
-        ]
+        "type": "command",
+        "command": "node --no-warnings ./scripts/session-summary-hook.js",
+        "timeout": 5
       }
     ]
   }
