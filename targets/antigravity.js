@@ -86,7 +86,15 @@ function install(options = {}) {
   const targetDir = path.join(pluginsBaseDir, PLUGIN_NAME);
   fs.mkdirSync(pluginsBaseDir, { recursive: true });
 
-  removePathSafe(targetDir);
+  // 陷阱: Windows 下正在运行的 sidecar 进程会锁定 sidecars/<id> 目录导致 rmdir 报 EBUSY；
+  // 遇到占用时自动降级为就地覆写更新，避免中断安装留下残缺目录。
+  try {
+    removePathSafe(targetDir);
+  } catch (err) {
+    if (!err || (err.code !== 'EBUSY' && err.code !== 'EPERM')) {
+      throw err;
+    }
+  }
   // 陷阱: Antigravity Go 插件扫描器 os.ReadDir 会跳过根目录软链/Junction，根级必须用真实目录
   fs.mkdirSync(targetDir, { recursive: true });
 
