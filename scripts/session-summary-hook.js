@@ -7,15 +7,17 @@ const path = require('path');
 const { computeLiveSessionMetrics } = require('../tools/agy-audit/lib/live-metrics');
 
 /**
- * 读取 transcript 末尾判断最新 PLANNER_RESPONSE 是否已结束本轮（无 tool_calls）
+ * 判断最新一步是否为工具调用中间态（需要静默防刷屏）
  * — 为什么这么写 —
- * PostInvocation 在每次模型调用后都会触发；若中间步骤有 tool_calls 也注入卡片会造成多步刷屏。
- * 仅在模型无 tool_calls（即已向用户输出最终答复）时注入一行免 Token 状态栏 + Sidecar 胶囊按钮。
+ * 1. 旧版若在 transcript.jsonl 尚未异步落盘首轮 PLANNER_RESPONSE 时找不到记录就返回 false，会误杀首轮状态栏。
+ * 2. 改为“仅明确检测到最后一条 PLANNER_RESPONSE 含 tool_calls 且尚未产生最终无工具答复时才跳过”，
+ *    其余情况（含首轮异步落盘窗口期）均正常放行展示。
  */
-function isFinalResponseStep(transcriptPath) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) return true;
+function isMidTurnToolStep(transcriptPath) {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return false;
   try {
     const stat = fs.statSync(transcriptPath);
+    if (stat.size === 0) return false;
     const readSize = Math.min(stat.size, 64 * 1024);
     const fd = fs.openSync(transcriptPath, 'r');
     const buf = Buffer.alloc(readSize);
@@ -31,7 +33,7 @@ function isFinalResponseStep(transcriptPath) {
       try {
         const obj = JSON.parse(line);
         if (obj.type === 'PLANNER_RESPONSE') {
-          return !Array.isArray(obj.tool_calls) || obj.tool_calls.length === 0;
+          return Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0;
         }
       } catch {
         // 忽略截断的首行或残缺行
@@ -41,6 +43,10 @@ function isFinalResponseStep(transcriptPath) {
     return false;
   }
   return false;
+}
+
+function isFinalResponseStep(transcriptPath) {
+  return !isMidTurnToolStep(transcriptPath);
 }
 
 function buildProgressBar(pct, width = 10) {
@@ -87,21 +93,40 @@ function evaluateSessionSummaryHook(payloadOrJson) {
     }
     if (!payload || typeof payload !== 'object') return {};
 
+    const hookEventName = payload.hookEventName || payload.hook_event_name || '';
     const conversationId = payload.conversationId || payload.conversation_id;
     const transcriptPath = payload.transcriptPath || payload.transcript_path;
+
+    // SessionStart 时直接挂出 0 Token 一键监控胶囊按钮，无需点右上角菜单
+    if (hookEventName === 'SessionStart') {
+      return {
+        injectSteps: [
+          {
+            systemMessage: {
+              systemMessage: '',
+              metadata: {
+                user_markdown:
+                  '📊 **Tokless 监控已就绪** &nbsp;|&nbsp; [打开实时会话监控面板](sidecar://agy-tokless/tokless_monitor/)',
+              },
+            },
+          },
+        ],
+      };
+    }
+
     if (!conversationId) return {};
 
-    // 仅在本轮最终答复（无 tool_calls）时输出，避免工具调用中间态刷屏
-    if (transcriptPath && !isFinalResponseStep(transcriptPath)) {
+    // 仅在明确处于工具调用中间态时静默跳过，避免误杀首轮答复
+    if (transcriptPath && isMidTurnToolStep(transcriptPath)) {
       return {};
     }
 
     const metrics = computeLiveSessionMetrics(conversationId);
-    if (!metrics || !metrics.sessionTotal || metrics.sessionTotal.totalCalls === 0) {
-      return {};
-    }
+    const md =
+      metrics && metrics.sessionTotal && metrics.sessionTotal.totalCalls > 0
+        ? buildSummaryMarkdown(metrics)
+        : '📊 **Tokless 会话监控** &nbsp;|&nbsp; [展开实时统计面板](sidecar://agy-tokless/tokless_monitor/)';
 
-    const md = buildSummaryMarkdown(metrics);
     return {
       injectSteps: [
         {
