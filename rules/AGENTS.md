@@ -18,4 +18,4 @@
   - macOS / Linux: `node "$HOME/.gemini/config/plugins/agy-tokless/tools/agy-audit/cli.js" <session|compare|project> <参数>`
   - Windows (PowerShell): `node "$env:USERPROFILE\.gemini\config\plugins\agy-tokless\tools\agy-audit\cli.js" <session|compare|project> <参数>`
 - **严控终端输出与保护 Prefix Cache**：`run_command` 必须主动限制长日志输出规模；对话中途保持顶部规则稳定只追加，控制上下文水位与对话轮次以降低累计 `Cache Read` 滚雪球并避免触发历史自动压缩（三代模型常见约 256K，四代模型实测跑上 440K 未触发、推测约 512K）。
-- **一键会话实时监控入口**：每次新会话的首次回复末尾，附带一行原生胶囊链接 `[📊 Tokless 实时监控](sidecar://agy-tokless/tokless_monitor/)`，方便用户一键打开右侧实时 Token/TTFT/缓存率监控面板（后续轮次无需重复刷屏）。
+- **一键会话实时监控入口**：每次对用户的最终回复末尾（子代理内部汇报除外），固定附带一行原生胶囊链接 `[📊 Tokless 实时监控](sidecar://agy-tokless/tokless_monitor/)`，确保无论对话进行到第几轮，最新回复正下方始终可一键展开/收起右侧实时监控面板。

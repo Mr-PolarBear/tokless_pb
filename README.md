@@ -5,8 +5,8 @@
 > 1. **Java 嵌套类边界栈与复杂签名修复**（`tools/repo-skeleton/lib/skeleton.js`）：将单变量类边界升级为 `classStack` 嵌套栈，支持内部类、`record`、多行 `throws`、点号类型（`Result.Obj<T>`）、多泛型（`Map<String, Object>`）与行内注解，排除匿名类字段误判。
 > 2. **传统 IIFE 前端 JS 支持**：自动识别顶层 `(function(...) { ... })` / `!function` / `(() => { ... })()` 闭包，下潜一层提取内部函数、箭头函数与类。
 > 3. **Antigravity 官方 Sidecar 实时监控面板 + 一键胶囊入口**（`sidecars/tokless_monitor/` + `tools/agy-audit/lib/live-metrics.js` + `rules/AGENTS.md`）：
->    - 零依赖直读 `conversations/<id>.db` Protobuf 纳秒时间戳与原生 Token 拆分，精确计算**当前上下文水位（`Xk/512k`）**、**全轮次平均缓存率**、**流式/端到端 `tok/s`**、**TTFT** 与 **思维链/正文占比**；
->    - 新会话首次答复末尾自动附带 `[📊 Tokless 实时监控](sidecar://agy-tokless/tokless_monitor/)` 原生胶囊按钮，一键展开右侧实时监控面板（2.5s 自动刷新，支持切换最近 10 个会话），纯官方插件机制，客户端日常更新永不失效。
+>    - 零依赖直读 `conversations/<id>.db` Protobuf 纳秒时间戳与原生 Token 拆分，精确计算**当前上下文水位（`Xk/512k`，支持 `/compact` 压缩后秒级降水位刷新）**、**全轮次平均缓存率**、**流式/端到端 `tok/s`**、**TTFT** 与 **思维链/正文占比**；
+>    - 每轮答复末尾自动附带 `[📊 Tokless 实时监控](sidecar://agy-tokless/tokless_monitor/)` 原生胶囊按钮，随时在最新消息下方一键展开/收起右侧实时监控面板（2.5s 自动刷新，支持 `mtimeMs` 热重载），纯官方插件机制，客户端日常更新永不失效。
 > 4. **回归单测覆盖**（`tests/java-and-iife-skeleton.test.js`、`tests/live-monitor.test.js`）：全量接入 `npm test`。
 
 <p align="left">

@@ -150,14 +150,17 @@ function readDbStepMetrics(dbPath) {
       .all();
     const map = new Map();
     for (const row of rows) {
-      const decoded = decodeStepMetadata(row.metadata);
-      if (decoded) {
-        map.set(Number(row.idx), {
-          idx: Number(row.idx),
-          stepType: Number(row.step_type),
-          ...decoded,
-        });
-      }
+      const decoded = decodeStepMetadata(row.metadata) || {
+        createdAtSec: null,
+        firstTokenAtSec: null,
+        completedAtSec: null,
+        usage: null,
+      };
+      map.set(Number(row.idx), {
+        idx: Number(row.idx),
+        stepType: Number(row.step_type),
+        ...decoded,
+      });
     }
     return map;
   } catch {
@@ -249,6 +252,34 @@ function computeLiveSessionMetrics(conversationIdOrPrefix) {
     }
   }
 
+  // 为什么这么写：/compact (CHECKPOINT) 或本轮末步会实时写入 SQLite WAL，但宿主导出 transcript_full.jsonl
+  // 往往延迟到下一轮对话启动。把 DB 中比 JSONL 更新的步骤按序补齐，才能在压缩完成的当秒立即刷新水位。
+  let maxJsonlIdx = -1;
+  for (const r of jsonlRecords) {
+    const idx = Number(r.step_index);
+    if (Number.isFinite(idx) && idx > maxJsonlIdx) maxJsonlIdx = idx;
+  }
+  if (dbSteps && dbSteps.size > 0) {
+    const extraIndices = Array.from(dbSteps.keys())
+      .filter((idx) => idx > maxJsonlIdx)
+      .sort((a, b) => a - b);
+    for (const idx of extraIndices) {
+      const m = dbSteps.get(idx);
+      const mappedType =
+        m.stepType === 14
+          ? 'USER_INPUT'
+          : m.stepType === 15
+          ? 'PLANNER_RESPONSE'
+          : m.stepType === 23
+          ? 'CHECKPOINT'
+          : 'GENERIC';
+      jsonlRecords.push({
+        step_index: idx,
+        type: mappedType,
+      });
+    }
+  }
+
   // 按 USER_INPUT 切分轮次（Turn）
   const turns = [];
   let currentTurn = null;
@@ -259,6 +290,8 @@ function computeLiveSessionMetrics(conversationIdOrPrefix) {
   let totalStepsCount = 0;
   let lastContextTokens = 0;
   let prevTurnEndContext = 0;
+  let baseSystemTokens = 0;
+  let firstUserChars = 0;
 
   const ensureTurn = (startSec) => {
     if (!currentTurn) {
@@ -282,6 +315,7 @@ function computeLiveSessionMetrics(conversationIdOrPrefix) {
         lastStepStreamTokPerSec: null,
         lastStepE2eTokPerSec: null,
         endContextTokens: 0,
+        isCompacted: false,
         hasExactTiming: false,
         hasExactThinkingSplit: false,
       };
@@ -298,6 +332,9 @@ function computeLiveSessionMetrics(conversationIdOrPrefix) {
       (dbMeta && (dbMeta.completedAtSec ?? dbMeta.createdAtSec)) ?? stepStartSec;
 
     if (rec.type === 'USER_INPUT') {
+      if (turns.length === 0 && firstUserChars === 0 && typeof rec.content === 'string') {
+        firstUserChars = rec.content.length;
+      }
       if (currentTurn && currentTurn.endContextTokens > 0) {
         prevTurnEndContext = currentTurn.endContextTokens;
       }
@@ -363,6 +400,10 @@ function computeLiveSessionMetrics(conversationIdOrPrefix) {
 
         const ctx = inp + cache;
         if (ctx > 0) {
+          if (baseSystemTokens === 0) {
+            const estUserTok = Math.round(firstUserChars / 3.5);
+            baseSystemTokens = Math.max(4000, ctx - estUserTok);
+          }
           lastContextTokens = ctx;
           t.endContextTokens = ctx;
         }
@@ -386,6 +427,59 @@ function computeLiveSessionMetrics(conversationIdOrPrefix) {
           t.lastStepTotalSec = total;
           t.lastStepStreamTokPerSec = stream > 0.05 ? out / stream : 0;
           t.lastStepE2eTokPerSec = total > 0.05 ? out / total : 0;
+        }
+      }
+    } else if (rec.type === 'CHECKPOINT') {
+      // 为什么这么写：CHECKPOINT 步（/compact 或自动压缩）的 input_tokens 是被压缩的旧历史，
+      // output_tokens / responseTokens 才是压缩后的新摘要。按“系统固定底座 + 新摘要”立即重算水位，
+      // 无需等用户发下一句话就能实时看到压缩降水位效果。
+      const dbUsage = dbMeta && dbMeta.usage;
+      const inp = dbUsage ? dbUsage.inputTokens : Number(rec.input_tokens) || 0;
+      const cache = dbUsage ? dbUsage.cacheReadTokens : Number(rec.cache_read_tokens) || 0;
+      const out = dbUsage ? dbUsage.outputTokens : Number(rec.output_tokens) || 0;
+      const summaryTok =
+        dbUsage && dbUsage.responseTokens > 0
+          ? dbUsage.responseTokens
+          : out > 0
+          ? out
+          : typeof rec.content === 'string'
+          ? Math.round(rec.content.length / 3.5)
+          : 0;
+
+      if (inp > 0 || cache > 0 || out > 0) {
+        totalPlannerCalls++;
+        t.plannerCalls++;
+        totalInputTokens += inp;
+        totalCacheReadTokens += cache;
+        totalOutputTokens += out;
+        t.inputTokens += inp;
+        t.cacheReadTokens += cache;
+        t.outputTokens += out;
+        const thinkTok = dbUsage ? dbUsage.thinkingTokens : 0;
+        const respTok = dbUsage && dbUsage.responseTokens > 0 ? dbUsage.responseTokens : out;
+        t.thinkingTokens += thinkTok;
+        t.responseTokens += respTok;
+      }
+
+      const estimatedBase = baseSystemTokens > 0 ? baseSystemTokens : 18000;
+      const postCompactCtx = estimatedBase + summaryTok;
+      if (t.endContextTokens > postCompactCtx) {
+        // 若同一轮内发生自动压缩，以压缩前本轮最高水位作为净增对比基准
+        t.prevEndContextTokens = t.endContextTokens;
+      }
+      lastContextTokens = postCompactCtx;
+      t.endContextTokens = postCompactCtx;
+      t.isCompacted = true;
+
+      if (dbMeta && dbMeta.createdAtSec !== null && dbMeta.completedAtSec !== null) {
+        const total = Math.max(0, dbMeta.completedAtSec - dbMeta.createdAtSec);
+        t.modelTotalSecSum += total;
+        if (dbMeta.firstTokenAtSec !== null) {
+          const ttft = Math.max(0, dbMeta.firstTokenAtSec - dbMeta.createdAtSec);
+          const stream = Math.max(0, dbMeta.completedAtSec - dbMeta.firstTokenAtSec);
+          t.hasExactTiming = true;
+          t.ttftSecSum += ttft;
+          t.streamSecSum += stream;
         }
       }
     }
@@ -444,6 +538,7 @@ function computeLiveSessionMetrics(conversationIdOrPrefix) {
       responseTokens: latest.responseTokens,
       thinkingPct,
       responsePct,
+      isCompacted: Boolean(latest.isCompacted),
       hasExactTiming: latest.hasExactTiming,
       hasExactThinkingSplit: latest.hasExactThinkingSplit,
     };
@@ -462,6 +557,7 @@ function computeLiveSessionMetrics(conversationIdOrPrefix) {
       elapsedSec: round(elapsed, 0),
       endContextTokens: t.endContextTokens,
       netDeltaTokens: delta,
+      isCompacted: Boolean(t.isCompacted),
       cacheHitPct: tp > 0 ? round((t.cacheReadTokens / tp) * 100, 1) : 0,
       streamTokPerSec:
         t.hasExactTiming && t.streamSecSum > 0.05

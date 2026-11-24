@@ -46,7 +46,7 @@
       align-items: center;
       gap: 6px;
     }
-    select, button {
+    button {
       background: var(--card, #ffffff);
       color: var(--foreground, #1f2328);
       border: 1px solid var(--card-border, #e2e0da);
@@ -171,7 +171,6 @@
       <span>Tokless 会话监控</span>
     </div>
     <div class="controls">
-      <select id="sessionSelect" title="切换查看最近会话"></select>
       <button id="refreshBtn" type="button">刷新</button>
     </div>
   </div>
@@ -235,7 +234,7 @@
         const deltaStr = `${t.netDeltaTokens >= 0 ? '+' : ''}${fmtCompact(t.netDeltaTokens)}`;
         return `
           <tr>
-            <td>#${t.turnIndex}</td>
+            <td>#${t.turnIndex}${t.isCompacted ? ' ✂' : ''}</td>
             <td>${fmtCompact(t.endContextTokens)}</td>
             <td>${deltaStr}</td>
             <td class="text-ok">${t.cacheHitPct.toFixed(1)}%</td>
@@ -263,7 +262,7 @@
             <span class="muted">本轮净增</span>
             <span class="row-val mono">
               <b>${ct ? ct.netDeltaFormatted : '0'}</b>
-              <span class="badge">缓存率 ${ct ? ct.turnCacheHitPct.toFixed(1) : '0.0'}%</span>
+              <span class="badge">${ct && ct.isCompacted ? '已压缩 · ' : ''}缓存率 ${ct ? ct.turnCacheHitPct.toFixed(1) : '0.0'}%</span>
             </span>
           </div>
           <div class="row">
@@ -320,26 +319,10 @@
         `更新于 ${new Date().toLocaleTimeString()}`;
     }
 
-    async function loadSessions() {
-      try {
-        const res = await fetchJson('/api/sessions');
-        if (!res.ok || !Array.isArray(res.sessions)) return;
-        const sel = document.getElementById('sessionSelect');
-        const prev = activeConvId;
-        sel.innerHTML = res.sessions
-          .map((s) => `<option value="${s.id}" ${s.id === prev ? 'selected' : ''}>${s.shortId}</option>`)
-          .join('');
-        if (!activeConvId && res.sessions.length > 0) {
-          activeConvId = res.sessions[0].id;
-        }
-      } catch {}
-    }
-
     async function refresh() {
       try {
         const res = await fetchJson('/api/metrics', activeConvId ? { conversationId: activeConvId } : {});
         if (res && res.ok && res.metrics) {
-          activeConvId = res.metrics.conversationId;
           render(res.metrics);
         } else {
           document.getElementById('content').innerHTML =
@@ -351,15 +334,9 @@
       }
     }
 
-    document.getElementById('sessionSelect').addEventListener('change', (e) => {
-      activeConvId = e.target.value;
-      refresh();
-    });
-    document.getElementById('refreshBtn').addEventListener('click', () => {
-      loadSessions().then(refresh);
-    });
+    document.getElementById('refreshBtn').addEventListener('click', refresh);
 
-    loadSessions().then(refresh);
+    refresh();
     setInterval(refresh, 2500);
   </script>
 </body>

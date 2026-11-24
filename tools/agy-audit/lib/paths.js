@@ -420,6 +420,38 @@ function getConversationMeta(conversationId) {
   return null;
 }
 
+/**
+ * 按最近更新时间降序列出本地有效会话（供无 conversationId 的全局面板兜底定位最近活跃会话）
+ */
+function listSessions(limit = 10) {
+  const maxItems = Math.max(1, Number(limit) || 10);
+  const seen = new Map();
+  for (const brainRoot of getBrainRoots()) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(brainRoot, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !isSafeSingleDirName(entry.name)) continue;
+      const brainDir = path.join(brainRoot, entry.name);
+      const info = findTranscriptInBrainDir(brainDir);
+      if (!info) continue;
+      try {
+        const mtimeMs = fs.statSync(info.filePath).mtimeMs;
+        const prev = seen.get(entry.name);
+        if (!prev || mtimeMs > prev.mtimeMs) {
+          seen.set(entry.name, { id: entry.name, filePath: info.filePath, mtimeMs });
+        }
+      } catch {}
+    }
+  }
+  return Array.from(seen.values())
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, maxItems);
+}
+
 module.exports = {
   isSafeSingleDirName,
   getAntigravityDir,
@@ -433,5 +465,6 @@ module.exports = {
   resolveConversationId,
   getTranscriptInfo,
   getConversationMeta,
-  inspectSessionMountedMcp
+  inspectSessionMountedMcp,
+  listSessions
 };
