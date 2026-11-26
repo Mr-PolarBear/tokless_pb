@@ -65,3 +65,24 @@ npm pack --dry-run        # 核查发布 tarball 文件列表与体积
 
 - POSIX: `(npm whoami || npm login) && npm publish --access public`
 - PowerShell: `if (!(npm whoami 2>$null)) { npm login }; npm publish --access public`
+
+## 7. Fork 日常维护速查（同步上游 / 本地重装 / 推送）
+
+本仓库采用单主干模式（`main` 为最新完整版，远端 `origin` 指向官方上游，`fork` 指向个人 Fork）：
+
+1. **同步上游更新**：
+   ```bash
+   git fetch origin --tags && git merge origin/main
+   ```
+   合并时须重点保留 4 处 Fork 定制：`sidecars/tokless_monitor/`、`tools/agy-audit/lib/live-metrics.js`、`targets/antigravity.js`（`sidecars` 挂载 + Windows `EBUSY` 覆写容错 + 清理残留 `hooks.json`）及 `rules/AGENTS.md` 末尾每轮 `sidecar://` 胶囊规则；并同步核对 `package.json` 的 `"sidecars/"` 与 `live-metrics.js` 对 `paths.js` 的调用签名。
+2. **验证与本机生效**：
+   ```bash
+   npm test && node install.js --target agy --copy
+   ```
+   - 仅改动 `sidecars/tokless_monitor/index.html` 或 `tools/agy-audit/lib/live-metrics.js` 时支持热重载（重开监控面板即可生效）；
+   - 改动 `sidecar.json` 或 `main.mjs` 时需重启客户端或在插件管理中重开关一次 `agy-tokless`；
+   - 改动 `rules/AGENTS.md` 下一轮/新会话自动生效。
+3. **推送发布**：
+   ```bash
+   git push fork main
+   ```
