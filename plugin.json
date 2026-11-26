@@ -1,8 +1,8 @@
 {
   "name": "agy-tokless",
   "displayName": "AGY Tokless — Antigravity 省流护栏与账单透视套件",
-  "version": "0.4.1",
-  "description": "专为 AI 编程打造的省流护栏与账单审计插件：提供代码语法骨架提取（repo-skeleton）、大文件盲读拦截钩子（PreToolUse Hook）、轻量净身角色模板（agents）以及 Prefix Cache 断层与 MCP 底座税体检工具（agy-audit）。",
+  "version": "0.5.4",
+  "description": "专为 AI 编程打造的省流导航与账单审计插件：提供代码语法骨架提取（repo-skeleton）、可选超大文件盲读骨架导航钩子（PreToolUse Hook，--with-guard 启用）、轻量净身角色模板（agents）以及 Prefix Cache 断层与 MCP 底座税体检工具（agy-audit）。",
   "disabled": false,
   "suggestedPrompts": [
     "使用 token-audit 检查最近会话的 Token 消耗黑洞、Prefix Cache 断层与当前项目的 MCP 底座空载税",

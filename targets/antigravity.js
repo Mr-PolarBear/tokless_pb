@@ -76,6 +76,7 @@ function install(options = {}) {
   const sourceDir = options.sourceDir || path.resolve(__dirname, '..');
   const homeDir = resolveHomeDir(options);
   const forceCopy = shouldForceCopy(sourceDir, options.copy);
+  const withGuard = Boolean(options.withGuard);
   const manifestPath = path.join(sourceDir, 'plugin.json');
 
   if (!fs.existsSync(manifestPath)) {
@@ -100,6 +101,11 @@ function install(options = {}) {
 
   const copiedFiles = [];
   for (const fileName of ROOT_FILES) {
+    if (fileName === 'hooks.json' && !withGuard) {
+      // 为什么这么写：Windows 下若 sidecar 占用导致目录走就地覆写分支，需显式清理旧版残留 hooks.json
+      removePathSafe(path.join(targetDir, fileName));
+      continue;
+    }
     const srcFile = path.join(sourceDir, fileName);
     if (fs.existsSync(srcFile)) {
       const destFile = path.join(targetDir, fileName);
@@ -133,6 +139,9 @@ function install(options = {}) {
     console.log(`   插件源目录 : ${sourceDir}`);
     console.log(`   清单文件   : ${copiedFiles.join(', ')}`);
     console.log(
+      `   读前护栏   : ${withGuard ? '已启用 (--with-guard, >800 行无行号导航)' : '默认关闭 (需启用请加 --with-guard)'}`
+    );
+    console.log(
       `   模块挂载   : ${Object.entries(dirModes)
         .map(([k, v]) => `${k}[${v}]`)
         .join(', ')}`
@@ -143,6 +152,7 @@ function install(options = {}) {
     target: 'antigravity',
     targetDir,
     copiedFiles,
+    withGuard,
     dirModes,
   };
 }

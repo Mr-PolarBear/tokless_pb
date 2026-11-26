@@ -139,6 +139,7 @@ function install(options = {}) {
   const sourceDir = options.sourceDir || path.resolve(__dirname, '..');
   const homeDir = resolveHomeDir(options);
   const forceCopy = shouldForceCopy(sourceDir, options.copy);
+  const withGuard = Boolean(options.withGuard);
 
   const claudeRoot = path.join(homeDir, '.claude');
   const coreDir = path.join(claudeRoot, 'tokless');
@@ -180,16 +181,28 @@ function install(options = {}) {
     );
   }
 
-  const hookScriptPath = path.join(coreDir, 'scripts', 'read-guard-hook.js');
-  const quotedNode = quoteCommandBinary(resolveNodeBinary());
-  const hookCommand = `${quotedNode} ${JSON.stringify(hookScriptPath)}`;
-  mergeClaudeSettings(settingsPath, hookCommand);
+  let hookCommand = null;
+  let cleanedStaleHook = false;
+  if (withGuard) {
+    const hookScriptPath = path.join(coreDir, 'scripts', 'read-guard-hook.js');
+    const quotedNode = quoteCommandBinary(resolveNodeBinary());
+    hookCommand = `${quotedNode} ${JSON.stringify(hookScriptPath)}`;
+    mergeClaudeSettings(settingsPath, hookCommand);
+  } else if (fs.existsSync(settingsPath)) {
+    cleanedStaleHook = unmergeClaudeSettings(settingsPath);
+  }
 
   if (!options.silent) {
     console.log('');
     console.log(`[tokless:claude] 已安装核心至 ${coreDir}`);
     console.log(`   技能目录   : ${skillDestDir}`);
-    console.log(`   钩子配置   : ${settingsPath} (PreToolUse -> Read)`);
+    if (withGuard) {
+      console.log(`   钩子配置   : ${settingsPath} (已启用 PreToolUse -> Read, >800 行无行号导航)`);
+    } else if (cleanedStaleHook) {
+      console.log(`   钩子配置   : 已从 ${settingsPath} 自动移除旧 PreToolUse 钩子 (默认关闭，需启用请加 --with-guard)`);
+    } else {
+      console.log(`   钩子配置   : 默认关闭 (需启用 PreToolUse -> Read 请加 --with-guard)`);
+    }
   }
 
   return {
@@ -198,6 +211,8 @@ function install(options = {}) {
     skillDestDir,
     settingsPath,
     hookCommand,
+    withGuard,
+    cleanedStaleHook,
     dirModes,
   };
 }
@@ -236,7 +251,7 @@ function uninstall(options = {}) {
 module.exports = {
   id: 'claude',
   aliases: ['claude', 'claude-code'],
-  label: 'Claude Code (~/.claude/tokless + PreToolUse Read hook)',
+  label: 'Claude Code (~/.claude/tokless + skills; optional PreToolUse Read hook)',
   mergeClaudeSettings,
   unmergeClaudeSettings,
   detect,

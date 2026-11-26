@@ -1,7 +1,13 @@
 'use strict';
 
 const fs = require('fs');
-const { resolveSessionTarget, getConversationMeta, inspectSessionMountedMcp } = require('./paths');
+const {
+  resolveSessionTarget,
+  getConversationMeta,
+  extractFallbackTitleFromTranscript,
+  cleanUserPromptTitle,
+  inspectSessionMountedMcp,
+} = require('./paths');
 
 const COMPACTION_THRESHOLD_256K = 256000;
 const COMPACTION_THRESHOLD_512K = 512000;
@@ -9,14 +15,65 @@ const CACHE_CLIFF_MIN_PREV_CONTEXT = 8000;
 const CACHE_CLIFF_RETENTION_RATIO = 0.55;
 const CACHE_CLIFF_MIN_DROP_TOKENS = 6000;
 const CACHE_CLIFF_MIN_INPUT_SPIKE = 5000;
+const SHORT_IDLE_TTL_SECONDS = 300; // 5m common implicit prompt cache TTL boundary
+const SHORT_IDLE_MAX_RETENTION_RATIO = 0.15; // <=15% retention separates cache eviction from mid-prefix edits
 const IDLE_TTL_WARNING_SECONDS = 3000; // ~50m+ (1h cache TTL boundary)
 const HEAVY_MCP_NAME_RE = /chrome|devtools|playwright|puppeteer|browser|selenium|figma|github|notion|jira|linear|supabase|slack|postgres/i;
 const HEAVY_MCP_EST_TOKENS = 3000;
 const STANDARD_MCP_EST_TOKENS = 1200;
+const MCP_BRIDGE_TOOL_EST_TOKENS = 80; // ~80 tokens per bridge tool schema (call_mcp_tool / list_resources / read_resource)
+const MCP_EMPTY_SERVER_EST_TOKENS = 15;
 
 function estimateTokens(chars) {
   if (!chars || chars <= 0) return 0;
   return Math.ceil(chars / 3.5);
+}
+
+function estimateLazyServerIndexTokens(lazyTools) {
+  let sum = 10; // "# <serverName>\nLazy:\n"
+  for (const toolName of lazyTools) {
+    sum += Math.max(4, Math.ceil((String(toolName || '').length + 2) / 3.5));
+  }
+  return sum;
+}
+
+function estimateMountedMcpServer(srv, fromSessionDb) {
+  const isHeavy = HEAVY_MCP_NAME_RE.test(srv.name);
+  const eagerCount = Array.isArray(srv.eagerTools) ? srv.eagerTools.length : 0;
+  const lazyTools = Array.isArray(srv.lazyTools) ? srv.lazyTools : [];
+  const lazyCount = lazyTools.length;
+
+  if (fromSessionDb) {
+    if (eagerCount === 0 && lazyCount > 0) {
+      return {
+        tier: 'lazy',
+        loadingMode: 'lazy',
+        estimateBasis: 'prompt_index',
+        estTokensPerStep: estimateLazyServerIndexTokens(lazyTools)
+      };
+    }
+    if (eagerCount === 0 && lazyCount === 0) {
+      return {
+        tier: 'lazy',
+        loadingMode: 'empty',
+        estimateBasis: 'prompt_index',
+        estTokensPerStep: MCP_EMPTY_SERVER_EST_TOKENS
+      };
+    }
+    return {
+      tier: isHeavy ? 'heavy' : 'standard',
+      loadingMode: lazyCount > 0 ? 'mixed' : 'eager',
+      estimateBasis: 'name_heuristic',
+      estTokensPerStep: isHeavy ? HEAVY_MCP_EST_TOKENS : STANDARD_MCP_EST_TOKENS
+    };
+  }
+
+  return {
+    tier: isHeavy ? 'heavy' : 'standard',
+    loadingMode: 'unknown',
+    estimateBasis: 'name_heuristic',
+    estTokensPerStep: isHeavy ? HEAVY_MCP_EST_TOKENS : STANDARD_MCP_EST_TOKENS
+  };
 }
 
 function byteLength(str) {
@@ -38,7 +95,8 @@ function hasLineRange(args) {
   if (!args || typeof args !== 'object') return false;
   return (
     parseLineNumber(args.StartLine ?? args.startLine ?? args.start_line) !== null ||
-    parseLineNumber(args.EndLine ?? args.endLine ?? args.end_line) !== null
+    parseLineNumber(args.EndLine ?? args.endLine ?? args.end_line) !== null ||
+    parseLineNumber(args.ByteOffset ?? args.byteOffset ?? args.byte_offset) !== null
   );
 }
 
@@ -167,14 +225,18 @@ function formatToolTarget(name, args) {
     const snippet = innerStr && innerStr !== '{}' ? ` ${innerStr.slice(0, 60)}${innerStr.length > 60 ? '...' : ''}` : '';
     return `${srv}::${tl}${snippet}`;
   }
-  if (args.Path || args.path) {
-    const p = args.Path || args.path;
+  const targetFile = args.Path ?? args.path ?? args.file_path ?? args.AbsolutePath;
+  if (targetFile) {
     const start = args.StartLine ?? args.startLine ?? args.start_line;
     const end = args.EndLine ?? args.endLine ?? args.end_line;
+    const byteOffset = args.ByteOffset ?? args.byteOffset ?? args.byte_offset;
     if (start !== undefined || end !== undefined) {
-      return `${p} [L${start ?? 1}-L${end ?? 'EOF'}]`;
+      return `${targetFile} [L${start ?? 1}-L${end ?? 'EOF'}]`;
     }
-    return p;
+    if (byteOffset !== undefined) {
+      return `${targetFile} [ByteOffset:${byteOffset}]`;
+    }
+    return targetFile;
   }
   if (args.CommandLine || args.command) {
     return args.CommandLine || args.command;
@@ -220,6 +282,24 @@ function extractTokenUsage(step) {
   return { input, output, cacheRead, hasUsage };
 }
 
+function extractStepModel(step) {
+  if (!step || typeof step !== 'object') return null;
+  const candidates = [
+    step.model,
+    step.model_name,
+    step.modelName,
+    step.usage && step.usage.model,
+    step.metadata && step.metadata.model
+  ];
+  for (const val of candidates) {
+    if (typeof val === 'string') {
+      const trimmed = val.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return null;
+}
+
 function computeIdleSeconds(prevIso, currIso) {
   if (!prevIso || !currIso) return null;
   const t1 = Date.parse(prevIso);
@@ -228,8 +308,9 @@ function computeIdleSeconds(prevIso, currIso) {
   return Math.round((t2 - t1) / 1000);
 }
 
-function analyzeSession(idOrPrefixOrPath) {
-  const { conversationId, transcriptInfo: info } = resolveSessionTarget(idOrPrefixOrPath);
+function analyzeSession(idOrPrefixOrPath, options = {}) {
+  const target = resolveSessionTarget(idOrPrefixOrPath, options);
+  const { conversationId, transcriptInfo: info } = target;
   if (!info) {
     throw new Error(`Transcript file not found for conversation: ${idOrPrefixOrPath}`);
   }
@@ -259,6 +340,7 @@ function analyzeSession(idOrPrefixOrPath) {
   let lastStepContextTokens = 0;
   let firstTimestamp = null;
   let lastTimestamp = null;
+  let fallbackTitle = '';
 
   const checkpoints = [];
   let pendingCheckpoint = null;
@@ -266,6 +348,8 @@ function analyzeSession(idOrPrefixOrPath) {
   let prevUsageStep = null;
   let sawCheckpointSincePrevUsage = false;
   let sawSettingsChangeSincePrevUsage = false;
+  const modelUsageMap = new Map();
+  let modelSwitchCount = 0;
 
   const toolCalls = [];
   const pendingQueue = [];
@@ -336,6 +420,24 @@ function analyzeSession(idOrPrefixOrPath) {
       totalOutputTokens += usage.output;
       totalCacheReadTokens += usage.cacheRead;
 
+      const currModel = extractStepModel(step);
+      if (currModel) {
+        if (!modelUsageMap.has(currModel)) {
+          modelUsageMap.set(currModel, {
+            model: currModel,
+            calls: 0,
+            inputTokens: 0,
+            cacheReadTokens: 0,
+            outputTokens: 0
+          });
+        }
+        const mu = modelUsageMap.get(currModel);
+        mu.calls++;
+        mu.inputTokens += usage.input;
+        mu.cacheReadTokens += usage.cacheRead;
+        mu.outputTokens += usage.output;
+      }
+
       currentTurnStat.inputTokens += usage.input;
       currentTurnStat.cacheReadTokens += usage.cacheRead;
       currentTurnStat.outputTokens += usage.output;
@@ -349,9 +451,15 @@ function analyzeSession(idOrPrefixOrPath) {
           currentTurnStat.peakContextTokens = stepContextTokens;
         }
 
+        const prevModel = prevUsageStep ? (prevUsageStep.model || null) : null;
+        const isModelSwitched = Boolean(prevModel && currModel && prevModel !== currModel);
+
         if (!prevUsageStep) {
           coldStartInputTokens = usage.input;
         } else {
+          if (isModelSwitched) {
+            modelSwitchCount++;
+          }
           postWarmupInputTokens += usage.input;
           postWarmupCacheReadTokens += usage.cacheRead;
 
@@ -369,15 +477,39 @@ function analyzeSession(idOrPrefixOrPath) {
               usage.input >= uncachedGap * 0.5
             ) {
               const idleSeconds = computeIdleSeconds(prevUsageStep.createdAt, step.created_at);
+              const isIdleExpired = idleSeconds !== null && idleSeconds >= IDLE_TTL_WARNING_SECONDS;
+              const isShortIdleEvicted =
+                idleSeconds !== null &&
+                idleSeconds >= SHORT_IDLE_TTL_SECONDS &&
+                idleSeconds < IDLE_TTL_WARNING_SECONDS &&
+                retentionRatio <= SHORT_IDLE_MAX_RETENTION_RATIO;
+              const isSameKnownModel = Boolean(prevModel && currModel && prevModel === currModel);
               let reasonCode = 'prefix_mutated_or_evicted';
-              let reason = `前缀变动或缓存驱逐 (仅复用 ${(retentionRatio * 100).toFixed(1)}% 历史前缀，排查动态规则/工具变更)`;
+              let reason = idleSeconds !== null && idleSeconds >= SHORT_IDLE_TTL_SECONDS
+                ? `前缀变动或局部缓存失效 (距上一步间隔 ${(idleSeconds / 60).toFixed(1)} 分钟，仍复用 ${(retentionRatio * 100).toFixed(1)}% 历史前缀，排查动态规则/工具变更)`
+                : `前缀变动或缓存驱逐 (仅复用 ${(retentionRatio * 100).toFixed(1)}% 历史前缀，排查动态规则/工具变更)`;
 
-              if (idleSeconds !== null && idleSeconds >= IDLE_TTL_WARNING_SECONDS) {
+              if (isIdleExpired) {
                 reasonCode = 'idle_ttl_expired';
-                reason = `闲置超时导致缓存过期 (距上一步间隔 ${(idleSeconds / 60).toFixed(1)} 分钟，超出缓存保活窗口)`;
-              } else if (sawSettingsChangeSincePrevUsage) {
+                const switchSuffix = isModelSwitched ? `，且同时切换模型 (${prevModel} → ${currModel})` : '';
+                reason = `闲置超时导致缓存过期 (距上一步间隔 ${(idleSeconds / 60).toFixed(1)} 分钟，超出缓存保活窗口${switchSuffix})`;
+              } else if (isModelSwitched) {
+                reasonCode = 'model_switch';
+                const switchSource = sawSettingsChangeSincePrevUsage ? '手动/设置切换模型' : '双模型/Orchestrator 自动切换';
+                const idleSuffix = idleSeconds !== null && idleSeconds >= SHORT_IDLE_TTL_SECONDS
+                  ? `，距上一步间隔 ${(idleSeconds / 60).toFixed(1)} 分钟`
+                  : '';
+                reason = `${switchSource} (${prevModel} → ${currModel}${idleSuffix}) 导致跨模型前缀重算`;
+              } else if (sawSettingsChangeSincePrevUsage && !(isSameKnownModel && isShortIdleEvicted)) {
                 reasonCode = 'settings_or_model_switch';
-                reason = '会话中途切换模型或设置 (USER_SETTINGS_CHANGE) 导致前缀重算';
+                const idleSuffix = idleSeconds !== null && idleSeconds >= SHORT_IDLE_TTL_SECONDS
+                  ? `，距上一步间隔 ${(idleSeconds / 60).toFixed(1)} 分钟`
+                  : '';
+                reason = `会话中途切换模型或设置 (USER_SETTINGS_CHANGE${idleSuffix}) 导致前缀重算`;
+              } else if (isShortIdleEvicted) {
+                reasonCode = 'short_idle_cache_evicted';
+                const settingsSuffix = sawSettingsChangeSincePrevUsage ? '，期间含非模型设置变更' : '';
+                reason = `疑似短窗口缓存过期/云端驱逐 (距上一步间隔 ${(idleSeconds / 60).toFixed(1)} 分钟，超过常见 ~5 分钟隐式缓存保活窗，仅复用 ${(retentionRatio * 100).toFixed(1)}% 前缀${settingsSuffix})`;
               }
 
               const estRebilledTokens = Math.min(usage.input, Math.max(0, uncachedGap));
@@ -388,6 +520,9 @@ function analyzeSession(idOrPrefixOrPath) {
                 turnIndex: Math.max(1, totalTurns),
                 createdAt: step.created_at || null,
                 idleSeconds,
+                prevModel,
+                currModel,
+                isModelSwitch: isModelSwitched,
                 prevContextTokens: prevContext,
                 prevCacheReadTokens: prevUsageStep.cacheRead,
                 currCacheReadTokens: usage.cacheRead,
@@ -419,7 +554,8 @@ function analyzeSession(idOrPrefixOrPath) {
           input: usage.input,
           cacheRead: usage.cacheRead,
           contextTokens: stepContextTokens,
-          createdAt: step.created_at || null
+          createdAt: step.created_at || null,
+          model: currModel
         };
         sawCheckpointSincePrevUsage = false;
         sawSettingsChangeSincePrevUsage = false;
@@ -660,11 +796,11 @@ function analyzeSession(idOrPrefixOrPath) {
   }
 
   // Merge session DB `<mcp_servers>` prompt inspection + transcript actual MCP invocations
-  const dbMcpInfo = inspectSessionMountedMcp(conversationId, info.filePath);
+  const dbMcpInfo = inspectSessionMountedMcp(conversationId, info.filePath, options);
   const mergedMcpMap = new Map();
 
   for (const srv of dbMcpInfo.servers) {
-    const isHeavy = HEAVY_MCP_NAME_RE.test(srv.name);
+    const est = estimateMountedMcpServer(srv, true);
     mergedMcpMap.set(srv.name, {
       name: srv.name,
       prefix: srv.prefix,
@@ -674,14 +810,16 @@ function analyzeSession(idOrPrefixOrPath) {
       eagerToolCount: srv.eagerTools.length,
       lazyToolCount: srv.lazyTools.length,
       invokedTools: [],
-      tier: isHeavy ? 'heavy' : 'standard',
-      estTokensPerStep: isHeavy ? HEAVY_MCP_EST_TOKENS : STANDARD_MCP_EST_TOKENS
+      tier: est.tier,
+      loadingMode: est.loadingMode,
+      estimateBasis: est.estimateBasis,
+      estTokensPerStep: est.estTokensPerStep
     });
   }
 
   for (const [srvName, inv] of invokedMcpMap.entries()) {
-    const isHeavy = HEAVY_MCP_NAME_RE.test(srvName);
     if (!mergedMcpMap.has(srvName)) {
+      const est = estimateMountedMcpServer({ name: srvName }, false);
       mergedMcpMap.set(srvName, {
         name: srvName,
         prefix: inv.prefix,
@@ -691,8 +829,10 @@ function analyzeSession(idOrPrefixOrPath) {
         eagerToolCount: 0,
         lazyToolCount: 0,
         invokedTools: Array.from(inv.invokedTools),
-        tier: isHeavy ? 'heavy' : 'standard',
-        estTokensPerStep: isHeavy ? HEAVY_MCP_EST_TOKENS : STANDARD_MCP_EST_TOKENS
+        tier: est.tier,
+        loadingMode: est.loadingMode,
+        estimateBasis: est.estimateBasis,
+        estTokensPerStep: est.estTokensPerStep
       });
     } else {
       const existing = mergedMcpMap.get(srvName);
@@ -704,9 +844,31 @@ function analyzeSession(idOrPrefixOrPath) {
 
   const mountedMcpServers = Array.from(mergedMcpMap.values());
   const mountedMcpPrefixes = mountedMcpServers.map(s => s.prefix);
-  const unusedMountedMcpServers = mountedMcpServers.filter(s => s.callCount === 0).map(s => s.name);
-  const estMountedMcpTokensPerStep = mountedMcpServers.reduce((acc, s) => acc + s.estTokensPerStep, 0);
-  const estMountedMcpSessionTaxTokens = estMountedMcpTokensPerStep * Math.max(1, plannerSteps);
+  const unusedMcpServerObjs = mountedMcpServers.filter(s => s.callCount === 0);
+  const unusedMountedMcpServers = unusedMcpServerObjs.map(s => s.name);
+  const hasAnyLazyServer = mountedMcpServers.some(s => s.lazyToolCount > 0);
+  const effectiveBridgeDecls = dbMcpInfo.detectedFromSessionDb && mountedMcpServers.length > 0
+    ? (dbMcpInfo.bridgeToolDeclCount > 0 ? dbMcpInfo.bridgeToolDeclCount : (hasAnyLazyServer ? 3 : 0))
+    : 0;
+  const sharedPreambleTokens = dbMcpInfo.detectedFromSessionDb && mountedMcpServers.length > 0
+    ? estimateTokens(dbMcpInfo.mcpPreambleChars || 0)
+    : 0;
+  const sharedBridgeTokens = effectiveBridgeDecls * MCP_BRIDGE_TOOL_EST_TOKENS;
+  const sharedOverheadEstTokensPerStep = sharedPreambleTokens + sharedBridgeTokens;
+
+  const serversEstTokensPerStep = mountedMcpServers.reduce((acc, s) => acc + s.estTokensPerStep, 0);
+  const estMountedMcpTokensPerStep = serversEstTokensPerStep + sharedOverheadEstTokensPerStep;
+  const stepMultiplier = Math.max(1, plannerSteps);
+  const estMountedMcpSessionTaxTokens = estMountedMcpTokensPerStep * stepMultiplier;
+
+  const allMountedUnused = mountedMcpServers.length > 0 && unusedMcpServerObjs.length === mountedMcpServers.length;
+  const unusedServersEstTokensPerStep = unusedMcpServerObjs.reduce((acc, s) => acc + s.estTokensPerStep, 0);
+  const unusedSharedOverheadPerStep = allMountedUnused ? sharedOverheadEstTokensPerStep : 0;
+  const unusedEstTokensPerStep = unusedServersEstTokensPerStep + unusedSharedOverheadPerStep;
+  const unusedEstSessionTaxTokens = unusedEstTokensPerStep * stepMultiplier;
+  const unusedLazyOnly =
+    unusedMcpServerObjs.length > 0 &&
+    unusedMcpServerObjs.every(s => s.loadingMode === 'lazy' || s.loadingMode === 'empty');
 
   const mcpAudit = {
     detectionSource: dbMcpInfo.detectedFromSessionDb
@@ -718,8 +880,14 @@ function analyzeSession(idOrPrefixOrPath) {
     totalMcpToolCalls: Array.from(invokedMcpMap.values()).reduce((s, x) => s + x.callCount, 0),
     prefixes: mountedMcpPrefixes,
     unusedServerNames: unusedMountedMcpServers,
+    sharedOverheadEstTokensPerStep,
     estTokensPerStep: estMountedMcpTokensPerStep,
     estSessionTaxTokens: estMountedMcpSessionTaxTokens,
+    unusedServersEstTokensPerStep,
+    unusedSharedOverheadPerStep,
+    unusedEstTokensPerStep,
+    unusedEstSessionTaxTokens,
+    unusedLazyOnly,
     servers: mountedMcpServers
   };
 
@@ -759,12 +927,29 @@ function analyzeSession(idOrPrefixOrPath) {
     }
   }
 
-  const dbMeta = getConversationMeta(conversationId);
+  if (!fallbackTitle) {
+    for (const s of steps) {
+      if (s && s.type === 'USER_INPUT' && typeof s.content === 'string') {
+        const cleaned = cleanUserPromptTitle(s.content);
+        if (cleaned) {
+          fallbackTitle = cleaned;
+          break;
+        }
+      }
+    }
+    if (!fallbackTitle) {
+      fallbackTitle = extractFallbackTitleFromTranscript(info.filePath);
+    }
+  }
+
+  const dbMeta = getConversationMeta(conversationId, options);
   const meta = {
     conversationId,
     shortId: conversationId.slice(0, 8),
-    title: (dbMeta && dbMeta.title) || 'Untitled Session',
+    title: (dbMeta && dbMeta.title) || fallbackTitle || 'Untitled Session',
     workspace: (dbMeta && dbMeta.workspace) || '',
+    source: target.source || 'unknown',
+    sourceLabel: target.sourceLabel || '',
     logType: info.logType,
     logFile: info.filePath,
     logBytes: info.bytes,
@@ -790,6 +975,37 @@ function analyzeSession(idOrPrefixOrPath) {
     ? Number(((postWarmupCacheReadTokens / postWarmupTotal) * 100).toFixed(1))
     : 0;
   const cacheRebilledTokens = cacheCliffs.reduce((s, c) => s + c.estRebilledTokens, 0);
+  const cacheCliffBreakdown = {
+    model_switch: { count: 0, estRebilledTokens: 0 },
+    idle_ttl_expired: { count: 0, estRebilledTokens: 0 },
+    short_idle_cache_evicted: { count: 0, estRebilledTokens: 0 },
+    settings_or_model_switch: { count: 0, estRebilledTokens: 0 },
+    prefix_mutated_or_evicted: { count: 0, estRebilledTokens: 0 }
+  };
+  for (const cliff of cacheCliffs) {
+    if (!cacheCliffBreakdown[cliff.reasonCode]) {
+      cacheCliffBreakdown[cliff.reasonCode] = { count: 0, estRebilledTokens: 0 };
+    }
+    cacheCliffBreakdown[cliff.reasonCode].count++;
+    cacheCliffBreakdown[cliff.reasonCode].estRebilledTokens += cliff.estRebilledTokens;
+  }
+  const modelSwitchCacheCliffCount = cacheCliffBreakdown.model_switch.count;
+  const modelSwitchCacheRebilledTokens = cacheCliffBreakdown.model_switch.estRebilledTokens;
+  const shortIdleCacheCliffCount = cacheCliffBreakdown.short_idle_cache_evicted.count;
+  const shortIdleCacheRebilledTokens = cacheCliffBreakdown.short_idle_cache_evicted.estRebilledTokens;
+  const modelBreakdown = Array.from(modelUsageMap.values())
+    .map(m => {
+      const billed = m.inputTokens + m.cacheReadTokens;
+      return {
+        model: m.model,
+        calls: m.calls,
+        inputTokens: m.inputTokens,
+        cacheReadTokens: m.cacheReadTokens,
+        outputTokens: m.outputTokens,
+        cacheHitRatePct: billed > 0 ? Number(((m.cacheReadTokens / billed) * 100).toFixed(1)) : 0
+      };
+    })
+    .sort((a, b) => (b.inputTokens + b.cacheReadTokens) - (a.inputTokens + a.cacheReadTokens) || b.calls - a.calls || a.model.localeCompare(b.model));
 
   const netDeltas = turnDeltas.map(t => t.netContextDeltaTokens);
   const maxTurnNetContextDeltaTokens = netDeltas.length > 0 ? Math.max(...netDeltas) : 0;
@@ -814,8 +1030,13 @@ function analyzeSession(idOrPrefixOrPath) {
       mountedMcpServers: mountedMcpServers.map(s => s.name),
       mountedMcpPrefixes,
       invokedMcpToolCalls: mcpAudit.totalMcpToolCalls,
+      mcpUnusedEstTokensPerStep: mcpAudit.unusedEstTokensPerStep,
+      mcpUnusedEstSessionTaxTokens: mcpAudit.unusedEstSessionTaxTokens,
       hasUsageMetrics: usageFieldSteps > 0,
       usageFieldSteps,
+      distinctModelCount: modelBreakdown.length,
+      modelsUsed: modelBreakdown.map(m => m.model),
+      modelSwitchCount,
       coldStartInputTokens,
       totalInputTokens,
       totalOutputTokens,
@@ -827,6 +1048,10 @@ function analyzeSession(idOrPrefixOrPath) {
       postWarmupCacheHitRatePct,
       cacheCliffCount: cacheCliffs.length,
       cacheRebilledTokens,
+      modelSwitchCacheCliffCount,
+      modelSwitchCacheRebilledTokens,
+      shortIdleCacheCliffCount,
+      shortIdleCacheRebilledTokens,
       peakContextTokens,
       peakContextPct256k,
       peakContextPct512k,
@@ -851,6 +1076,8 @@ function analyzeSession(idOrPrefixOrPath) {
     turnDeltas,
     checkpoints,
     cacheCliffs,
+    modelBreakdown,
+    cacheCliffBreakdown,
     toolBreakdown,
     topBloats
   };

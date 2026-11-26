@@ -1,7 +1,7 @@
 {
   "name": "tokless",
-  "version": "0.4.1",
-  "description": "Token optimizer, AST codebase skeletonizer, PreToolUse blind-read guard, lightweight role templates, and cache/compaction auditor for AI coding agents.",
+  "version": "0.5.4",
+  "description": "Token optimizer, AST codebase skeletonizer, optional PreToolUse blind-read guard, lightweight role templates, and cache/compaction auditor for AI coding agents.",
   "license": "MIT",
   "main": "./index.js",
   "bin": {
@@ -40,7 +40,9 @@
     "uninstall-plugin": "node ./install.js --uninstall",
     "audit": "node ./tools/agy-audit/cli.js",
     "skeleton": "node ./tools/repo-skeleton/cli.js",
-    "test": "node ./tests/verify-tokless.js && node --test ./tests/cross-platform-fixes.test.js ./tests/java-and-iife-skeleton.test.js ./tests/live-monitor.test.js",
+    "bump": "node ./scripts/bump-version.js",
+    "version": "node ./scripts/bump-version.js --sync-from-pkg && git add plugin.json",
+    "test": "node ./tests/run-all.js",
     "prepublishOnly": "npm test"
   },
   "repository": {

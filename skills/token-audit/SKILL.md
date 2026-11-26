@@ -14,11 +14,14 @@ description: 审计与对比 Antigravity 会话的真实 Token 账单（Input / 
 ### macOS / Linux (bash / zsh)
 
 ```bash
-# 1. 解剖单个会话（支持短 ID 前缀或日志路径），查看缓存断层、最慢步骤 Top 3、MCP 空载继承与 Top 5 烧钱步骤
-node "$HOME/.gemini/config/plugins/agy-tokless/tools/agy-audit/cli.js" session <会话ID或前缀>
+# 0. 列出最近会话（兼容 antigravity / antigravity-cli / antigravity-ide，支持 --source cli|app|ide|all）
+node "$HOME/.gemini/config/plugins/agy-tokless/tools/agy-audit/cli.js" list --source cli
+
+# 1. 解剖单个会话（支持 latest、latest~1、短 ID 前缀或日志路径），查看缓存断层、模型切换型缓存断层归因、最慢步骤 Top 3、MCP 空载继承与 Top 5 烧钱步骤
+node "$HOME/.gemini/config/plugins/agy-tokless/tools/agy-audit/cli.js" session latest
 
 # 2. 优化前后双会话 A/B 对比（对比总 Token、Cache Read 滚雪球、缓存命中率、盲读次数与节省比例）
-node "$HOME/.gemini/config/plugins/agy-tokless/tools/agy-audit/cli.js" compare <优化前会话ID> <优化后会话ID>
+node "$HOME/.gemini/config/plugins/agy-tokless/tools/agy-audit/cli.js" compare latest~1 latest
 
 # 3. 诊断指定项目的常驻规则/Skill 肥胖度，以及全局/工作区 MCP 与工具底座空载税
 node "$HOME/.gemini/config/plugins/agy-tokless/tools/agy-audit/cli.js" project <项目目录路径>
@@ -27,11 +30,14 @@ node "$HOME/.gemini/config/plugins/agy-tokless/tools/agy-audit/cli.js" project <
 ### Windows (PowerShell)
 
 ```powershell
-# 1. 解剖单个会话（支持短 ID 前缀或日志路径），查看缓存断层、最慢步骤 Top 3、MCP 空载继承与 Top 5 烧钱步骤
-node "$env:USERPROFILE\.gemini\config\plugins\agy-tokless\tools\agy-audit\cli.js" session <会话ID或前缀>
+# 0. 列出最近 agy CLI 会话
+node "$env:USERPROFILE\.gemini\config\plugins\agy-tokless\tools\agy-audit\cli.js" list --source cli
+
+# 1. 解剖单个会话（支持 latest、latest~1、短 ID 前缀或日志路径），查看缓存断层、模型切换型缓存断层归因、最慢步骤 Top 3、MCP 空载继承与 Top 5 烧钱步骤
+node "$env:USERPROFILE\.gemini\config\plugins\agy-tokless\tools\agy-audit\cli.js" session latest
 
 # 2. 优化前后双会话 A/B 对比（对比总 Token、Cache Read 滚雪球、缓存命中率、盲读次数与节省比例）
-node "$env:USERPROFILE\.gemini\config\plugins\agy-tokless\tools\agy-audit\cli.js" compare <优化前会话ID> <优化后会话ID>
+node "$env:USERPROFILE\.gemini\config\plugins\agy-tokless\tools\agy-audit\cli.js" compare latest~1 latest
 
 # 3. 诊断指定项目的常驻规则/Skill 肥胖度，以及全局/工作区 MCP 与工具底座空载税
 node "$env:USERPROFILE\.gemini\config\plugins\agy-tokless\tools\agy-audit\cli.js" project <项目目录路径>

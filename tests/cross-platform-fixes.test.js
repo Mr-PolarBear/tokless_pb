@@ -9,17 +9,27 @@ const test = require('node:test');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 
-test('install.js writes executable absolute node path into hooks.json and hook runs without node on PATH', () => {
+test('install.js omits hooks.json by default, writes executable absolute node path with --with-guard, and cleans up on re-install', () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'agy-tokless-install-'));
   try {
-    execFileSync(process.execPath, [path.join(REPO_ROOT, 'install.js'), '--copy'], {
-      env: { ...process.env, HOME: tempHome, USERPROFILE: tempHome },
-      stdio: 'pipe',
-    });
-
+    const installEnv = { ...process.env, HOME: tempHome, USERPROFILE: tempHome };
     const pluginDir = path.join(tempHome, '.gemini', 'config', 'plugins', 'agy-tokless');
     const hooksPath = path.join(pluginDir, 'hooks.json');
-    assert.ok(fs.existsSync(hooksPath), 'hooks.json should be installed');
+
+    // 1) Default install omits hooks.json
+    execFileSync(process.execPath, [path.join(REPO_ROOT, 'install.js'), '--copy'], {
+      env: installEnv,
+      stdio: 'pipe',
+    });
+    assert.ok(fs.existsSync(path.join(pluginDir, 'plugin.json')), 'plugin.json should be installed');
+    assert.ok(!fs.existsSync(hooksPath), 'hooks.json must not be installed without --with-guard');
+
+    // 2) --with-guard writes absolute node path into hooks.json
+    execFileSync(process.execPath, [path.join(REPO_ROOT, 'install.js'), '--with-guard', '--copy'], {
+      env: installEnv,
+      stdio: 'pipe',
+    });
+    assert.ok(fs.existsSync(hooksPath), 'hooks.json should be installed when --with-guard is passed');
 
     const hooks = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
     const command = hooks['read-file-guard'].PreToolUse[0].hooks[0].command;
@@ -32,13 +42,19 @@ test('install.js writes executable absolute node path into hooks.json and hook r
       `expected read-guard-hook.js in command, got: ${command}`
     );
 
-    const largeFile = path.join(REPO_ROOT, 'tools', 'agy-audit', 'lib', 'analyzer.js');
+    const largeFile = path.join(tempHome, 'large-target.js');
+    const largeLines = [];
+    for (let i = 1; i <= 850; i++) {
+      largeLines.push(i === 8 ? 'function guardedEntry() { return 42; }' : `const row${i} = ${i};`);
+    }
+    fs.writeFileSync(largeFile, largeLines.join('\n'), 'utf8');
+
     const minimalEnv =
       process.platform === 'win32'
         ? { ...process.env }
         : { PATH: '/usr/bin:/bin', HOME: tempHome };
 
-    // 1) Blind read of >200-line file must be denied with skeleton line ranges
+    // 3) Unsliced blind read of >800-line file must be denied with skeleton line ranges
     const blindPayload = JSON.stringify({
       toolCall: { name: 'read_file', args: { Path: largeFile } },
     });
@@ -52,9 +68,9 @@ test('install.js writes executable absolute node path into hooks.json and hook r
     assert.equal(denyJson.decision, 'deny');
     assert.match(denyJson.reason, /\[L\d+-L\d+\]/);
 
-    // 2) Ranged read must be allowed
+    // 4) Explicit line range (even L1-L850) must be allowed
     const rangedPayload = JSON.stringify({
-      toolCall: { name: 'read_file', args: { Path: largeFile, StartLine: 1, EndLine: 20 } },
+      toolCall: { name: 'read_file', args: { Path: largeFile, StartLine: 1, EndLine: 850 } },
     });
     const allowOut = execSync(command, {
       cwd: pluginDir,
@@ -64,6 +80,13 @@ test('install.js writes executable absolute node path into hooks.json and hook r
     });
     const allowJson = JSON.parse(allowOut.trim());
     assert.equal(allowJson.decision, 'allow');
+
+    // 5) Re-running default install cleans up stale hooks.json
+    execFileSync(process.execPath, [path.join(REPO_ROOT, 'install.js'), '--copy'], {
+      env: installEnv,
+      stdio: 'pipe',
+    });
+    assert.ok(!fs.existsSync(hooksPath), 're-running default install should remove stale hooks.json');
   } finally {
     fs.rmSync(tempHome, { recursive: true, force: true });
   }

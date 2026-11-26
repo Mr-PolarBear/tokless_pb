@@ -214,9 +214,11 @@ function formatCompactTokens(n) {
 function computeLiveSessionMetrics(conversationIdOrPrefix) {
   let conversationId = conversationIdOrPrefix ? String(conversationIdOrPrefix).trim() : '';
   if (!conversationId) {
-    const sessions = listSessions(1);
+    // 兼容上游 v0.5.2+ listSessions({ limit }) 新签名（返回 conversationId 字段）
+    const sessions = listSessions({ limit: 1 });
     if (!sessions.length) return null;
-    conversationId = sessions[0].id;
+    conversationId = sessions[0].conversationId || sessions[0].id || '';
+    if (!conversationId) return null;
   } else {
     try {
       conversationId = resolveConversationId(conversationId);

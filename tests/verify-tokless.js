@@ -5,9 +5,10 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execFileSync, spawnSync } = require('child_process');
+const { execFileSync, execSync, spawnSync } = require('child_process');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
+const EXPECTED_VERSION = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).version;
 
 function walkFiles(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -49,7 +50,14 @@ function testZeroPersonalPathLeak() {
     if (file.endsWith('.zip') || file.endsWith('.png') || file.endsWith('.jpg')) continue;
     const rel = path.relative(REPO_ROOT, file);
     const normalizedRel = rel.replace(/\\/g, '/');
-    if (normalizedRel === 'tests/verify-tokless.js' || normalizedRel === '.tokless-private-denylist') continue;
+    if (
+      normalizedRel === 'tests/verify-tokless.js' ||
+      normalizedRel === '.tokless-private-denylist' ||
+      normalizedRel === 'AGENTS.local.md' ||
+      normalizedRel.endsWith('.local.md')
+    ) {
+      continue;
+    }
     const content = fs.readFileSync(file, 'utf8');
     for (const re of forbiddenPatterns) {
       const m = content.match(re);
@@ -63,6 +71,9 @@ function testZeroPersonalPathLeak() {
     0,
     `Personal username or local machine path leaked in repository:\n${violations.join('\n')}`
   );
+  const packOut = execSync('npm pack --dry-run --json', { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const packedPaths = (JSON.parse(packOut.slice(packOut.indexOf('[')))[0]?.files || []).map((f) => f.path);
+  assert(packedPaths.length > 0 && !packedPaths.some((p) => p === 'AGENTS.local.md' || p.endsWith('.local.md') || p === '.tokless-private-denylist'));
   console.log('  [PASS] 1. Zero personal username or local machine path leaks across repository');
 }
 
@@ -195,10 +206,23 @@ function testAgyAuditCacheCliffsAndMcpTax(tmpDir) {
     { encoding: 'utf8' }
   );
   const selfAudit = JSON.parse(selfAuditRaw);
-  assert.strictEqual(selfAudit.summary.lineViolations, 0, 'tokless docs must have 0 line limit violations');
-  assert.strictEqual(selfAudit.summary.densityWarnings, 0, 'tokless docs must have 0 byte density warnings');
+  assert(selfAudit.summary.alwaysOn.count >= 2, 'Both root AGENTS.md and rules/AGENTS.md must be discovered');
+  assert(typeof selfAudit.summary.alwaysOn.est30StepTokens === 'number', '30-step snowball token estimate must be exposed');
   assert.strictEqual(selfAudit.summary.progressiveDisclosure.count, 2, 'Both code-skeleton and token-audit SKILL.md must exist');
   assert.strictEqual(selfAudit.mcpAndToolTax.agents.length, 2, 'Exactly 2 official lightweight agent templates (coder + reviewer) must be discovered');
+
+  const rootPkgJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+  const rootPluginJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'plugin.json'), 'utf8'));
+  assert.strictEqual(
+    Object.keys(rootPkgJson.dependencies || {}).length,
+    0,
+    'package.json must maintain zero runtime dependencies'
+  );
+  assert.strictEqual(
+    rootPkgJson.version,
+    rootPluginJson.version,
+    `Version mismatch: package.json (${rootPkgJson.version}) !== plugin.json (${rootPluginJson.version}). Run: npm run bump -- <version>`
+  );
 
   console.log('  [PASS] 2. agy-audit session Prefix Cache cliffs, Gen3/Gen4 compaction context & MCP/tool base tax');
 }
@@ -208,16 +232,54 @@ function testRepoSkeletonAndReadGuardHook(tmpDir) {
   const out = execFileSync(process.execPath, [skelCli, REPO_ROOT, '--depth', '3'], { encoding: 'utf8' });
   assert(out.includes('read-guard-hook.js'));
   assert(out.includes('function evaluateReadGuard'));
+  assert(out.includes(' 字 | '));
+
+  const mapOut = execFileSync(process.execPath, [skelCli, REPO_ROOT, '--map'], { encoding: 'utf8' });
+  assert(mapOut.includes('目录地图:'));
+  assert(mapOut.includes('tools/repo-skeleton/lib/skeleton.js ('));
+  assert(!mapOut.includes('function evaluateReadGuard'), '--map mode must not expand internal AST signatures');
+
+  const mapShallowOut = execFileSync(process.execPath, [skelCli, REPO_ROOT, '--map', '--depth', '1'], { encoding: 'utf8' });
+  assert(mapShallowOut.includes('index.js ('));
+  assert(!mapShallowOut.includes('tools/repo-skeleton/lib/skeleton.js ('), '--map with --depth 1 must respect explicit depth');
+
+  const mapJsonRaw = execFileSync(process.execPath, [skelCli, REPO_ROOT, '--map', '--json'], { encoding: 'utf8' });
+  const mapJson = JSON.parse(mapJsonRaw);
+  assert.strictEqual(mapJson.mode, 'map');
+  assert.strictEqual(mapJson.depth, 8);
+  assert(typeof mapJson.totalChars === 'number' && mapJson.totalChars > 1000);
+  assert(Array.isArray(mapJson.files) && mapJson.files.some((f) => f.relPath === 'tools/repo-skeleton/lib/skeleton.js' && f.charCount > 1000));
+
+  const cliHelpOut = execFileSync(process.execPath, [skelCli, '--help'], { encoding: 'utf8' });
+  assert(cliHelpOut.includes('--map'));
 
   const hookScript = path.join(REPO_ROOT, 'scripts', 'read-guard-hook.js');
+  const mediumJs = path.join(tmpDir, 'medium-750.js');
+  const mediumLines = [];
+  for (let i = 1; i <= 750; i++) {
+    mediumLines.push(i === 10 ? 'function withinLimit() { return 1; }' : `const m${i} = ${i};`);
+  }
+  fs.writeFileSync(mediumJs, mediumLines.join('\n'), 'utf8');
+
   const bigJs = path.join(tmpDir, 'big.js');
   const bigLines = [];
-  for (let i = 1; i <= 520; i++) {
+  for (let i = 1; i <= 900; i++) {
     bigLines.push(i === 10 ? 'function alpha() { return 1; }' : `const v${i} = ${i};`);
   }
   fs.writeFileSync(bigJs, bigLines.join('\n'), 'utf8');
 
-  // 1) Blind read of >200-line file MUST deny with skeleton
+  // 0) Blind read of <=800-line file MUST allow by default
+  const mediumBlindRes = spawnSync(
+    process.execPath,
+    [hookScript],
+    {
+      input: JSON.stringify({ toolCall: { name: 'read_file', args: { Path: mediumJs } } }),
+      encoding: 'utf8'
+    }
+  );
+  assert.strictEqual(JSON.parse(mediumBlindRes.stdout.trim()).decision, 'allow');
+
+  // 1) Unsliced blind read of >800-line file MUST deny with skeleton navigation
   const blindRes = spawnSync(
     process.execPath,
     [hookScript],
@@ -230,7 +292,7 @@ function testRepoSkeletonAndReadGuardHook(tmpDir) {
   assert.strictEqual(blindJson.decision, 'deny');
   assert(blindJson.reason.includes('function alpha()'));
 
-  // 2) Ranged read of 450 lines (e.g. L20-L470) MUST 100% allow (300-line hard cap abolished!)
+  // 2) Ranged read of 450 lines (e.g. L20-L470) MUST 100% allow
   const ranged450Res = spawnSync(
     process.execPath,
     [hookScript],
@@ -242,31 +304,29 @@ function testRepoSkeletonAndReadGuardHook(tmpDir) {
   const ranged450Json = JSON.parse(ranged450Res.stdout.trim());
   assert.strictEqual(ranged450Json.decision, 'allow');
 
-  // 3) Ranged read from L1-L450 on a 520-line file MUST also allow (not covering EOF)
-  const top450Res = spawnSync(
+  // 3) Explicit full-file line range (e.g. L1-L900 on a 900-line file) MUST 100% allow (fake-slice block abolished!)
+  const explicitFullRes = spawnSync(
     process.execPath,
     [hookScript],
     {
-      input: JSON.stringify({ toolCall: { name: 'read_file', args: { Path: bigJs, StartLine: 1, EndLine: 450 } } }),
+      input: JSON.stringify({ toolCall: { name: 'read_file', args: { Path: bigJs, StartLine: 1, EndLine: 900 } } }),
       encoding: 'utf8'
     }
   );
-  assert.strictEqual(JSON.parse(top450Res.stdout.trim()).decision, 'allow');
+  assert.strictEqual(JSON.parse(explicitFullRes.stdout.trim()).decision, 'allow');
 
-  // 4) Fake full-file slice (startLine <= 2 && requestedEnd >= totalLines - 2) MUST deny
-  const fakeSliceRes = spawnSync(
+  // 4) Single-sided line parameter (StartLine only or EndLine only) MUST also allow
+  const startOnlyRes = spawnSync(
     process.execPath,
     [hookScript],
     {
-      input: JSON.stringify({ toolCall: { name: 'read_file', args: { Path: bigJs, StartLine: 1, EndLine: 520 } } }),
+      input: JSON.stringify({ toolCall: { name: 'read_file', args: { Path: bigJs, StartLine: 1 } } }),
       encoding: 'utf8'
     }
   );
-  const fakeSliceJson = JSON.parse(fakeSliceRes.stdout.trim());
-  assert.strictEqual(fakeSliceJson.decision, 'deny');
-  assert(fakeSliceJson.reason.includes('function alpha()'));
+  assert.strictEqual(JSON.parse(startOnlyRes.stdout.trim()).decision, 'allow');
 
-  // 5) Claude Code `Read` PreToolUse hook compatibility (deny blind read + allow ranged offset/limit + deny fake full read)
+  // 5) Claude Code `Read` PreToolUse hook compatibility (deny >800 unsliced blind read + allow any explicit offset/limit including L1-L900)
   const claudeBlindRes = spawnSync(
     process.execPath,
     [hookScript],
@@ -300,34 +360,33 @@ function testRepoSkeletonAndReadGuardHook(tmpDir) {
   const claudeAllowJson = JSON.parse(claudeAllowRes.stdout.trim());
   assert.deepStrictEqual(claudeAllowJson, {});
 
-  const claudeFakeFullRes = spawnSync(
+  const claudeExplicitFullRes = spawnSync(
     process.execPath,
     [hookScript],
     {
       input: JSON.stringify({
         hook_event_name: 'PreToolUse',
         tool_name: 'Read',
-        tool_input: { file_path: bigJs, offset: 1, limit: 520 }
+        tool_input: { file_path: bigJs, offset: 1, limit: 900 }
       }),
       encoding: 'utf8'
     }
   );
-  const claudeFakeFullJson = JSON.parse(claudeFakeFullRes.stdout.trim());
-  assert.strictEqual(claudeFakeFullJson.hookSpecificOutput.permissionDecision, 'deny');
+  assert.deepStrictEqual(JSON.parse(claudeExplicitFullRes.stdout.trim()), {});
 
   // 6) TOKLESS_READ_MAX_LINES env priority over AGY_READ_MAX_LINES
   const envOverrideRes = spawnSync(
     process.execPath,
     [hookScript],
     {
-      env: { ...process.env, TOKLESS_READ_MAX_LINES: '600', AGY_READ_MAX_LINES: '100' },
+      env: { ...process.env, TOKLESS_READ_MAX_LINES: '1000', AGY_READ_MAX_LINES: '100' },
       input: JSON.stringify({ toolCall: { name: 'read_file', args: { Path: bigJs } } }),
       encoding: 'utf8'
     }
   );
   assert.strictEqual(JSON.parse(envOverrideRes.stdout.trim()).decision, 'allow');
 
-  console.log('  [PASS] 3. repo-skeleton & PreToolUse read-guard-hook (AGY + Claude Code Read, 450-line allow, fake-slice deny)');
+  console.log('  [PASS] 3. repo-skeleton & PreToolUse read-guard-hook (800-line default, explicit line range 100% allow)');
 }
 
 function testProgrammaticPackageExports(tmpDir) {
@@ -340,7 +399,7 @@ function testProgrammaticPackageExports(tmpDir) {
   const consumerScript = path.join(consumerDir, 'check-exports.js');
   const bigJs = path.join(tmpDir, 'export-guard-big.js');
   const bigLines = [];
-  for (let i = 1; i <= 500; i++) {
+  for (let i = 1; i <= 860; i++) {
     bigLines.push(i === 15 ? 'function exportedAlpha(x) { return x + 1; }' : `const item${i} = ${i};`);
   }
   fs.writeFileSync(bigJs, bigLines.join('\n'), 'utf8');
@@ -381,7 +440,8 @@ const guardMod = require('tokless/read-guard');
 const pkgJson = require('tokless/package.json');
 
 assert.strictEqual(pkgJson.name, 'tokless');
-assert.strictEqual(pkgJson.version, '0.4.1');
+assert.strictEqual(pkgJson.version, ${JSON.stringify(EXPECTED_VERSION)});
+assert.strictEqual(typeof rootPkg.scanFileLightweight, 'function');
 assert(pkgJson.bin && pkgJson.bin.tokless && pkgJson.bin['repo-skeleton'] && pkgJson.bin['agy-audit']);
 assert.deepStrictEqual(Object.keys(pkgJson.bin).sort(), ['agy-audit', 'repo-skeleton', 'tokless']);
 assert(pkgJson.exports['.'] && pkgJson.exports['./skeleton']);
@@ -390,20 +450,54 @@ assert.deepStrictEqual(Object.keys(pkgJson.exports).sort(), ['.', './audit', './
 
 assert.strictEqual(rootPkg.generateFileSkeleton, skelMod.generateFileSkeleton);
 assert.strictEqual(rootPkg.scanDirectorySkeleton, skelMod.scanDirectorySkeleton);
+assert.strictEqual(rootPkg.generateRepoMap, skelMod.generateRepoMap);
+assert.strictEqual(rootPkg.formatDirectoryMap, skelMod.formatDirectoryMap);
+assert.strictEqual(rootPkg.sliceSymbol, skelMod.sliceSymbol);
+assert.strictEqual(rootPkg.locateSymbol, skelMod.locateSymbol);
+assert.strictEqual(typeof rootPkg.sliceSymbol, 'function');
+assert.strictEqual(typeof rootPkg.locateSymbol, 'function');
+assert.strictEqual(typeof skelMod.sliceSymbol, 'function');
 assert.strictEqual(typeof skelMod.generateSkeleton, 'function');
 assert.strictEqual(typeof skelMod.formatDirectorySkeleton, 'function');
+assert.strictEqual(typeof skelMod.generateRepoMap, 'function');
+assert.strictEqual(typeof skelMod.formatDirectoryMap, 'function');
 
-const fileSkel = skelMod.generateFileSkeleton(${JSON.stringify(bigJs)});
-assert.strictEqual(fileSkel.totalLines, 500);
+const slicedAlpha = rootPkg.sliceSymbol(${JSON.stringify(bigJs)}, 'exportedAlpha');
+assert.strictEqual(slicedAlpha.mode, 'slice');
+assert.strictEqual(slicedAlpha.found, true);
+assert.strictEqual(slicedAlpha.matchCount, 1);
+assert.strictEqual(slicedAlpha.matches[0].startLine, 15);
+assert.strictEqual(slicedAlpha.matches[0].endLine, 15);
+assert(slicedAlpha.matches[0].content.includes('function exportedAlpha(x) { return x + 1; }'));
+
+const fileSkel = skelMod.generateFileSkeleton(${JSON.stringify(bigJs)}, { includeHeader: true });
+assert.strictEqual(fileSkel.totalLines, 860);
+assert.strictEqual(fileSkel.lineCount, 860);
+assert.strictEqual(fileSkel.charCount, fs.readFileSync(${JSON.stringify(bigJs)}, 'utf8').length);
 assert(fileSkel.formatted.includes('function exportedAlpha(x)'));
+assert(fileSkel.formatted.includes(' 字 | '));
 
 const unifiedFile = skelMod.generateSkeleton(${JSON.stringify(bigJs)});
 assert.strictEqual(unifiedFile.mode, 'file');
+assert.strictEqual(unifiedFile.charCount, fileSkel.charCount);
+assert(unifiedFile.text.includes(' 字 | '));
 assert(unifiedFile.text.includes('function exportedAlpha(x)'));
 
 const unifiedDir = skelMod.generateSkeleton(${JSON.stringify(tmpDir)}, { depth: 1 });
 assert.strictEqual(unifiedDir.mode, 'directory');
+assert(typeof unifiedDir.totalChars === 'number' && unifiedDir.totalChars >= fileSkel.charCount);
 assert(unifiedDir.text.includes('export-guard-big.js'));
+assert(unifiedDir.text.includes(' 字 | '));
+
+const repoMap = rootPkg.generateRepoMap(${JSON.stringify(tmpDir)});
+assert.strictEqual(repoMap.mode, 'map');
+assert.strictEqual(repoMap.map, true);
+assert(repoMap.text.includes('export-guard-big.js (860 行 | '));
+assert(!repoMap.text.includes('function exportedAlpha(x)'));
+
+const mapViaSkel = skelMod.generateSkeleton(${JSON.stringify(tmpDir)}, { map: true });
+assert.strictEqual(mapViaSkel.mode, 'map');
+assert.strictEqual(mapViaSkel.totalChars, repoMap.totalChars);
 
 assert.strictEqual(rootPkg.analyzeSession, auditMod.analyzeSession);
 assert.strictEqual(rootPkg.auditProject, auditMod.auditProject);
@@ -432,10 +526,10 @@ const allow450Verdict = guardMod.evaluateReadGuard({
 });
 assert.strictEqual(allow450Verdict.decision, 'allow');
 
-const denyFakeFullVerdict = guardMod.evaluateReadGuard({
-  toolCall: { name: 'read_file', args: { Path: ${JSON.stringify(bigJs)}, StartLine: 2, EndLine: 499 } }
+const allowExplicitFullVerdict = guardMod.evaluateReadGuard({
+  toolCall: { name: 'read_file', args: { Path: ${JSON.stringify(bigJs)}, StartLine: 1, EndLine: 860 } }
 });
-assert.strictEqual(denyFakeFullVerdict.decision, 'deny');
+assert.strictEqual(allowExplicitFullVerdict.decision, 'allow');
 
 const claudeCfg = guardMod.buildClaudePreToolUseHookConfig();
 assert(Array.isArray(claudeCfg.PreToolUse) && claudeCfg.PreToolUse[0].matcher === 'Read');
@@ -482,14 +576,25 @@ function testUnifiedCliAndCrossAgentTargets(tmpDir) {
   assert.strictEqual(shouldForceCopy('/opt/local/repo/tokless', true), true);
 
   const verOut = execFileSync(process.execPath, [cliPath, '--version'], { encoding: 'utf8' }).trim();
-  assert.strictEqual(verOut, '0.4.1');
+  assert.strictEqual(verOut, EXPECTED_VERSION);
+  const pluginManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'plugin.json'), 'utf8'));
+  assert.strictEqual(pluginManifest.version, EXPECTED_VERSION);
+
+  const { bumpVersion } = require(path.join(REPO_ROOT, 'scripts', 'bump-version.js'));
+  const bumpSandbox = path.join(tmpDir, 'bump-sandbox');
+  fs.mkdirSync(bumpSandbox, { recursive: true });
+  fs.writeFileSync(path.join(bumpSandbox, 'package.json'), JSON.stringify({ name: 'tokless', version: '0.1.0' }), 'utf8');
+  fs.writeFileSync(path.join(bumpSandbox, 'plugin.json'), JSON.stringify({ name: 'agy-tokless', version: '0.1.0' }), 'utf8');
+  bumpVersion('v1.2.3', { rootDir: bumpSandbox });
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(bumpSandbox, 'package.json'), 'utf8')).version, '1.2.3');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(bumpSandbox, 'plugin.json'), 'utf8')).version, '1.2.3');
 
   const helpOut = execFileSync(process.execPath, [cliPath, '--help'], { encoding: 'utf8' });
-  assert(helpOut.includes('tokless install') && helpOut.includes('tokless skeleton') && helpOut.includes('tokless audit'));
+  assert(helpOut.includes('tokless install') && helpOut.includes('--with-guard') && helpOut.includes('tokless skeleton') && helpOut.includes('tokless audit'));
 
   const sampleJs = path.join(tmpDir, 'cli-skel-sample.js');
   const sampleLines = [];
-  for (let i = 1; i <= 240; i++) {
+  for (let i = 1; i <= 840; i++) {
     sampleLines.push(i === 12 ? 'function sampleTargetFn(a, b) { return a + b; }' : `const v${i} = ${i};`);
   }
   fs.writeFileSync(sampleJs, sampleLines.join('\n'), 'utf8');
@@ -497,7 +602,7 @@ function testUnifiedCliAndCrossAgentTargets(tmpDir) {
   const skelJsonRaw = execFileSync(process.execPath, [cliPath, 'skeleton', sampleJs, '--json'], { encoding: 'utf8' });
   const skelJson = JSON.parse(skelJsonRaw);
   assert.strictEqual(skelJson.mode, 'file');
-  assert.strictEqual(skelJson.totalLines, 240);
+  assert.strictEqual(skelJson.totalLines, 840);
   assert(skelJson.formatted.includes('function sampleTargetFn(a, b)'));
 
   const auditSessionJsonl = path.join(tmpDir, 'cli-audit-session.jsonl');
@@ -541,25 +646,45 @@ function testUnifiedCliAndCrossAgentTargets(tmpDir) {
   fs.writeFileSync(claudeSettingsPath, JSON.stringify(existingSettings, null, 2), 'utf8');
 
   const envWithHome = { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome };
+  const agyPluginDir = path.join(isolatedHome, '.gemini', 'config', 'plugins', 'agy-tokless');
+  const agyHooksPath = path.join(agyPluginDir, 'hooks.json');
 
+  // 1) Default install MUST NOT mount PreToolUse hooks.json or Claude Read hook
   execFileSync(process.execPath, [cliPath, 'install', '--copy'], {
     env: envWithHome,
     encoding: 'utf8',
     stdio: 'pipe'
   });
 
-  // Idempotent second install should not duplicate tokless PreToolUse hook
-  execFileSync(process.execPath, [cliPath, 'install', '--target', 'claude', '--copy'], {
+  assert(fs.existsSync(path.join(agyPluginDir, 'plugin.json')));
+  assert(!fs.existsSync(agyHooksPath), 'Default install must not generate hooks.json');
+  assert(fs.existsSync(path.join(agyPluginDir, 'tools', 'repo-skeleton', 'lib', 'core', 'registry.js')));
+  assert(fs.existsSync(path.join(agyPluginDir, 'tools', 'repo-skeleton', 'lib', 'langs', 'java', 'index.js')));
+  assert(fs.existsSync(path.join(claudeDir, 'tokless', 'scripts', 'read-guard-hook.js')));
+  assert(fs.existsSync(path.join(claudeDir, 'tokless', 'tools', 'repo-skeleton', 'lib', 'core', 'registry.js')));
+  assert(fs.existsSync(path.join(claudeDir, 'tokless', 'tools', 'repo-skeleton', 'lib', 'langs', 'java', 'index.js')));
+  assert(fs.existsSync(path.join(claudeDir, 'skills', 'code-skeleton', 'SKILL.md')));
+  assert(fs.existsSync(path.join(codexDir, 'skills', 'code-skeleton', 'SKILL.md')));
+  assert(fs.existsSync(path.join(codexDir, 'skills', 'code-skeleton', 'tools', 'repo-skeleton', 'lib', 'core', 'registry.js')));
+  assert(fs.existsSync(path.join(codexDir, 'skills', 'code-skeleton', 'tools', 'repo-skeleton', 'lib', 'langs', 'java', 'index.js')));
+
+  const defaultClaudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
+  assert.strictEqual(defaultClaudeSettings.hooks.PreToolUse.length, 1, 'Default install must not inject Claude Read hook');
+  assert.strictEqual(defaultClaudeSettings.hooks.PreToolUse[0].matcher, 'Bash');
+
+  // 2) Opt-in --with-guard install MUST mount hooks.json and idempotently merge Claude Read hook
+  execFileSync(process.execPath, [cliPath, 'install', '--with-guard', '--copy'], {
+    env: envWithHome,
+    encoding: 'utf8',
+    stdio: 'pipe'
+  });
+  execFileSync(process.execPath, [cliPath, 'install', '--target', 'claude', '--with-guard', '--copy'], {
     env: envWithHome,
     encoding: 'utf8',
     stdio: 'pipe'
   });
 
-  assert(fs.existsSync(path.join(isolatedHome, '.gemini', 'config', 'plugins', 'agy-tokless', 'plugin.json')));
-  assert(fs.existsSync(path.join(claudeDir, 'tokless', 'scripts', 'read-guard-hook.js')));
-  assert(fs.existsSync(path.join(claudeDir, 'skills', 'code-skeleton', 'SKILL.md')));
-  assert(fs.existsSync(path.join(codexDir, 'skills', 'code-skeleton', 'SKILL.md')));
-
+  assert(fs.existsSync(agyHooksPath), '--with-guard must generate Antigravity hooks.json');
   const mergedSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
   assert.strictEqual(mergedSettings.theme, 'dark');
   assert.deepStrictEqual(mergedSettings.permissions, existingSettings.permissions);
@@ -587,6 +712,24 @@ function testUnifiedCliAndCrossAgentTargets(tmpDir) {
   const claudeDenyJson = JSON.parse(claudeDenyRes.stdout.trim());
   assert.strictEqual(claudeDenyJson.hookSpecificOutput.permissionDecision, 'deny');
   assert(claudeDenyJson.hookSpecificOutput.permissionDecisionReason.includes('function sampleTargetFn'));
+
+  // 3) Re-running default install (without --with-guard) MUST automatically purge stale hooks
+  execFileSync(process.execPath, [cliPath, 'install', '--copy'], {
+    env: envWithHome,
+    encoding: 'utf8',
+    stdio: 'pipe'
+  });
+  assert(!fs.existsSync(agyHooksPath), 'Re-running default install must remove stale Antigravity hooks.json');
+  const autoCleanedSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf8'));
+  assert.strictEqual(autoCleanedSettings.hooks.PreToolUse.length, 1, 'Re-running default install must remove stale Claude Read hook');
+  assert.strictEqual(autoCleanedSettings.hooks.PreToolUse[0].matcher, 'Bash');
+
+  // 4) Re-enable --with-guard and verify clean uninstall
+  execFileSync(process.execPath, [cliPath, 'install', '--with-guard', '--copy'], {
+    env: envWithHome,
+    encoding: 'utf8',
+    stdio: 'pipe'
+  });
 
   execFileSync(process.execPath, [cliPath, 'uninstall', '--target', 'all'], {
     env: envWithHome,
