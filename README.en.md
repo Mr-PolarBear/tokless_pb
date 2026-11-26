@@ -1,3 +1,14 @@
+> [!NOTE]
+> **Fork Enhancements (synced with upstream [daoif/tokless](https://github.com/daoif/tokless) main)**
+>
+> *Earlier Java nested-class/generic/annotation and JS IIFE fixes from this fork have been merged into upstream's modular lexer parsers and are no longer fork-only.*
+>
+> On top of upstream `tokless`, this fork adds **Antigravity Live Session Context Monitoring**:
+> 1. **Zero-Dependency Live Telemetry (`tools/agy-audit/lib/live-metrics.js`)**: Reads `conversations/<id>.db` Protobuf nanosecond timestamps and native token splits (with SQLite WAL tail catch-up) at 0 LLM token cost—showing real-time context watermark (`Xk/512k`, instant drop after `/compact`), average cache hit rate, streaming/E2E `tok/s`, TTFT, thinking vs. response split, and recent turns.
+> 2. **Official Sidecar Panel + Per-Reply Pill (`sidecars/tokless_monitor/` + `rules/AGENTS.md`)**: Appends a native `[📊 Tokless 实时监控](sidecar://agy-tokless/tokless_monitor/)` toggle pill to open/close the 2.5s auto-refreshing Sidecar pane (with `mtimeMs` backend hot-reload), surviving Antigravity client updates.
+> 3. **Windows Reinstall Resilience (`targets/antigravity.js`)**: Patches absolute `node` path into `sidecar.json`, gracefully falls back to in-place overwrite on Windows `EBUSY` sidecar locks, and preserves upstream `--with-guard` opt-in semantics.
+> 4. **Local Install**: Clone this fork and run `node install.js --target agy --copy` (covered by `tests/live-monitor.test.js` in `npm test`).
+
 <p align="left">
   <img src="./assets/logo.svg" width="60" height="60" alt="Tokless Logo" />
 </p>

@@ -1,11 +1,13 @@
 > [!NOTE]
-> **二开说明（已同步上游 [daoif/tokless](https://github.com/daoif/tokless) 最新主干，含模块化 Java/IIFE-UMD 词法解析、`tokless slice` 符号切片与 `audit` 增强）**
+> **二开说明（基于上游 [daoif/tokless](https://github.com/daoif/tokless) 最新主干同步）**
 >
-> 在上游基础上，本 Fork 额外提供 **Antigravity 官方 Sidecar 实时监控面板** 能力：
-> 1. **零依赖实时遥测引擎**（`tools/agy-audit/lib/live-metrics.js`）：直读 `conversations/<id>.db` Protobuf 纳秒时间戳与原生 Token 拆分，实时补齐 SQLite WAL 领先步骤，精确计算**当前上下文水位（`Xk/512k`，支持 `/compact` 压缩后秒级降水位刷新）**、**全轮次平均缓存率**、**流式/端到端 `tok/s`**、**TTFT** 与 **思维链/正文占比**。
-> 2. **官方 Sidecar 面板 + 每轮一键胶囊入口**（`sidecars/tokless_monitor/` + `rules/AGENTS.md`）：每轮答复末尾自动附带 `[📊 Tokless 实时监控](sidecar://agy-tokless/tokless_monitor/)` 原生胶囊按钮，随时在最新消息正下方一键展开/收起右侧实时监控面板（2.5s 自动刷新，支持 `mtimeMs` 热重载）；纯官方插件机制，客户端日常升级永不失效。
-> 3. **Windows 稳定安装容错**（`targets/antigravity.js`）：安装时自动写入绝对 `node` 路径并在运行中 Sidecar 锁定目录报 `EBUSY` 时优雅降级为就地覆写更新，同时严格保留上游 `--with-guard` 可选护栏语义。
-> 4. **回归单测覆盖**（`tests/live-monitor.test.js`）：通过 `tests/run-all.js` 自动纳入 `npm test`。
+> *此前本 Fork 针对 Java 嵌套类/泛型/注解与前端 IIFE 的骨架修复已合入上游主干并升级为模块化词法解析（含注解数组花括号抹平等增强），故不再列为差异项。*
+>
+> 在上游全套能力基础上，本 Fork 额外提供 **Antigravity 会话上下文实时监控** 增强：
+> 1. **实时上下文遥测引擎**（`tools/agy-audit/lib/live-metrics.js`）：0 模型 Token 开销，零依赖直读 `conversations/<id>.db` Protobuf 纳秒时间戳与原生 Token 拆分，并实时补齐 SQLite WAL 领先步骤；精准展示**当前上下文水位（`Xk/512k`，`/compact` 压缩后秒级降水位刷新）**、**全轮次平均缓存率**、**流式/端到端 `tok/s`**、**首字延迟 TTFT**、**思维链 vs 正文占比**与**最近轮次趋势**。
+> 2. **官方 Sidecar 面板 + 每轮一键胶囊入口**（`sidecars/tokless_monitor/` + `rules/AGENTS.md`）：每轮答复末尾自动附带 `[📊 Tokless 实时监控](sidecar://agy-tokless/tokless_monitor/)` 原生胶囊按钮，一键展开/收起右侧实时监控面板（2.5s 自动刷新，支持 `mtimeMs` 热重载）；纯官方插件机制，客户端日常升级永不失效。
+> 3. **Windows 稳定安装容错**（`targets/antigravity.js`）：安装时自动写入 `node` 绝对路径，遇运行中 Sidecar 目录锁报 `EBUSY` 时自动就地覆写，并完整保留上游默认关闭 `--with-guard` 护栏语义。
+> 4. **本地启用方式**：克隆本仓库后执行 `node install.js --target agy --copy`（含 `tests/live-monitor.test.js` 自动回归测试）。
 
 <p align="left">
   <img src="./assets/logo.svg" width="60" height="60" alt="Tokless Logo" />
