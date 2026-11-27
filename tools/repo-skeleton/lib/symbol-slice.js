@@ -3,7 +3,12 @@
 const fs = require('fs');
 const path = require('path');
 const { estimateTokens, splitLines } = require('./core/lexer');
-const { normalizeExt, getLanguageDir, getLanguageHandler } = require('./core/registry');
+const { SUPPORTED_EXTS, normalizeExt, getLanguageDir, getLanguageHandler } = require('./core/registry');
+const { resolveMaxDepth, walkDirectory } = require('./core/dir-walker');
+
+const DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const DEFAULT_MAX_INLINE_MATCHES = 3;
+const DEFAULT_MAX_INLINE_LINES = 200;
 
 function stripMarkdownDecorations(text) {
   if (!text) return '';
@@ -299,19 +304,19 @@ function segmentsSuffixMatch(itemSegs, querySegs, caseInsensitive = false, strip
   return true;
 }
 
-function matchQualifiedItems(qualifiedItems, rawQuery, ext = '') {
+function matchQualifiedItemsWithTier(qualifiedItems, rawQuery, ext = '') {
   const normalizedExt = normalizeExt(ext);
   const isMarkdown = getLanguageDir(normalizedExt) === 'markdown';
   const query = normalizeSymbolQuery(rawQuery, { isMarkdown });
-  if (!query || qualifiedItems.length === 0) return [];
+  if (!query || qualifiedItems.length === 0) return { tier: 0, items: [] };
 
   const hierarchical = hasHierarchySeparator(query, isMarkdown);
   let matched = [];
+  let tier = 0;
 
   if (hierarchical) {
     const querySegs = splitHierarchySegments(query, isMarkdown);
 
-    // 1. Exact full hierarchy match (or exact alias match)
     matched = qualifiedItems.filter((item) => {
       if (item.aliases.includes(query)) return true;
       return (
@@ -319,17 +324,17 @@ function matchQualifiedItems(qualifiedItems, rawQuery, ext = '') {
         segmentsSuffixMatch(item.segments, querySegs, false, false)
       );
     });
+    if (matched.length > 0) tier = 1;
 
-    // 2. Markdown decoration-stripped exact full hierarchy match
     if (matched.length === 0 && isMarkdown) {
       matched = qualifiedItems.filter(
         (item) =>
           item.segments.length === querySegs.length &&
           segmentsSuffixMatch(item.segments, querySegs, false, true)
       );
+      if (matched.length > 0) tier = 2;
     }
 
-    // 3. Case-insensitive full hierarchy match
     if (matched.length === 0) {
       const qLower = query.toLowerCase();
       matched = qualifiedItems.filter((item) => {
@@ -339,22 +344,23 @@ function matchQualifiedItems(qualifiedItems, rawQuery, ext = '') {
           segmentsSuffixMatch(item.segments, querySegs, true, isMarkdown)
         );
       });
+      if (matched.length > 0) tier = 3;
     }
 
-    // 4. Suffix segment match (e.g. Inner.run matching Outer.Inner.run)
     if (matched.length === 0 && querySegs.length >= 2) {
       matched = qualifiedItems.filter((item) =>
         segmentsSuffixMatch(item.segments, querySegs, false, isMarkdown)
       );
-      if (matched.length === 0) {
+      if (matched.length > 0) {
+        tier = 4;
+      } else {
         matched = qualifiedItems.filter((item) =>
           segmentsSuffixMatch(item.segments, querySegs, true, isMarkdown)
         );
+        if (matched.length > 0) tier = 5;
       }
     }
   } else {
-    // Single symbol name query
-    // 1. Exact match on item.name or item.shortName (including JS #private methods)
     const hashPrefixed = `#${query}`;
     matched = qualifiedItems.filter(
       (item) =>
@@ -363,14 +369,14 @@ function matchQualifiedItems(qualifiedItems, rawQuery, ext = '') {
         item.name === hashPrefixed ||
         item.shortName === hashPrefixed
     );
+    if (matched.length > 0) tier = 1;
 
-    // 2. Markdown stripped decoration match (exact case)
     if (matched.length === 0 && isMarkdown) {
       const cleanQuery = stripMarkdownDecorations(query);
       matched = qualifiedItems.filter((item) => item.cleanName === cleanQuery);
+      if (matched.length > 0) tier = 2;
     }
 
-    // 3. Case-insensitive match on name / shortName / cleanName
     if (matched.length === 0) {
       const qLower = query.toLowerCase();
       const cleanQLower = isMarkdown ? stripMarkdownDecorations(query).toLowerCase() : qLower;
@@ -382,10 +388,20 @@ function matchQualifiedItems(qualifiedItems, rawQuery, ext = '') {
         }
         return false;
       });
+      if (matched.length > 0) tier = 3;
     }
   }
 
-  return matched.slice().sort((a, b) => a.startLine - b.startLine || (a.depth || 0) - (b.depth || 0));
+  return {
+    tier,
+    items: matched
+      .slice()
+      .sort((a, b) => a.startLine - b.startLine || (a.depth || 0) - (b.depth || 0)),
+  };
+}
+
+function matchQualifiedItems(qualifiedItems, rawQuery, ext = '') {
+  return matchQualifiedItemsWithTier(qualifiedItems, rawQuery, ext).items;
 }
 
 function splitIdentifierWords(str) {
@@ -472,6 +488,7 @@ function scoreCandidateSimilarity(query, item) {
         overlap += 1;
       } else if (qw.length >= 3) {
         for (const cw of cSet) {
+          if (cw.length < 3) continue;
           if (cw.includes(qw) || qw.includes(cw)) {
             overlap += 0.7;
             break;
@@ -708,18 +725,508 @@ function sliceSymbolFromText(content, ext, symbolQuery, options = {}) {
   };
 }
 
+function extractPrefilterNeedle(rawQuery) {
+  const q = normalizeSymbolQuery(rawQuery, { isMarkdown: false });
+  if (!q) return '';
+  const segs = splitHierarchySegments(q, false);
+  const lastSeg = segs.length > 0 ? segs[segs.length - 1] : q;
+  const cleaned = stripMarkdownDecorations(lastSeg)
+    .replace(/^[#~]+/, '')
+    .replace(/\(\s*\)$/, '')
+    .trim();
+  if (!cleaned) return '';
+  if (/^operator\b/i.test(cleaned)) {
+    return 'operator';
+  }
+  if (/\s/.test(cleaned)) {
+    const tokens = cleaned.match(/[A-Za-z0-9_$\u4e00-\u9fff]+/g);
+    if (!tokens || tokens.length === 0) return '';
+    let longest = tokens[0];
+    for (let i = 1; i < tokens.length; i++) {
+      if (tokens[i].length > longest.length) longest = tokens[i];
+    }
+    return longest.toLowerCase();
+  }
+  return cleaned.toLowerCase();
+}
+
+function extractFuzzyProbes(rawQuery) {
+  const probes = new Set();
+  const words = splitIdentifierWords(rawQuery);
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    if (/[\u4e00-\u9fff]/.test(w)) {
+      if (w.length >= 2) probes.add(w);
+    } else if (w.length >= 3) {
+      probes.add(w);
+    }
+  }
+  const needle = extractPrefilterNeedle(rawQuery);
+  if (needle && needle.length >= 4) {
+    probes.add(needle.slice(0, 3));
+    probes.add(needle.slice(-3));
+  } else if (needle && needle.length >= 2) {
+    probes.add(needle);
+  }
+  return [...probes];
+}
+
+function collectDirectorySuggestions(pool, query, qualifiedItems, entry) {
+  for (let i = 0; i < qualifiedItems.length; i++) {
+    const item = qualifiedItems[i];
+    const score = scoreCandidateSimilarity(query, item);
+    if (score >= 0.36) {
+      pool.push({
+        score,
+        item: {
+          relPath: entry.relPath,
+          filePath: entry.fullPath,
+          qualifiedName: item.qualifiedName,
+          name: item.name,
+          kind: item.kind,
+          signature: item.signature,
+          startLine: item.startLine,
+          endLine: item.endLine,
+        },
+      });
+    }
+  }
+}
+
+function finalizeDirectorySuggestions(pool, maxCount = 5) {
+  pool.sort(
+    (a, b) =>
+      b.score - a.score ||
+      a.item.relPath.localeCompare(b.item.relPath) ||
+      a.item.startLine - b.item.startLine
+  );
+  const out = [];
+  const seen = new Set();
+  for (let i = 0; i < pool.length && out.length < maxCount; i++) {
+    const it = pool[i].item;
+    const key = `${it.relPath}:${it.qualifiedName}:${it.startLine}-${it.endLine}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(it);
+  }
+  return out;
+}
+
+function formatDirectorySliceExpanded(matches, query) {
+  if (matches.length === 1) {
+    const m = matches[0];
+    return `File: ${m.relPath}\n[L${m.startLine}-L${m.endLine}] ${m.signature}\n${m.content}`;
+  }
+
+  const matchedFileCount = new Set(matches.map((m) => m.relPath)).size;
+  const totalLines = matches.reduce((sum, m) => sum + m.lineCount, 0);
+  const header = `Found ${matches.length} matches for "${query}" across ${matchedFileCount} ${matchedFileCount === 1 ? 'file' : 'files'} (${totalLines} lines):`;
+  const fileBlocks = [];
+  let currentRel = null;
+  let currentChunks = [];
+
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    if (m.relPath !== currentRel) {
+      if (currentChunks.length > 0) fileBlocks.push(currentChunks.join('\n\n'));
+      currentRel = m.relPath;
+      currentChunks = [
+        `File: ${m.relPath}\n[L${m.startLine}-L${m.endLine}] ${m.signature}\n${m.content}`,
+      ];
+    } else {
+      currentChunks.push(`[L${m.startLine}-L${m.endLine}] ${m.signature}\n${m.content}`);
+    }
+  }
+  if (currentChunks.length > 0) fileBlocks.push(currentChunks.join('\n\n'));
+
+  return `${header}\n\n${fileBlocks.join('\n\n')}`;
+}
+
+function formatDirectorySliceList(matches, query) {
+  const matchedFileCount = new Set(matches.map((m) => m.relPath)).size;
+  const totalLines = matches.reduce((sum, m) => sum + m.lineCount, 0);
+  const out = [
+    `Found ${matches.length} matches for "${query}" across ${matchedFileCount} ${matchedFileCount === 1 ? 'file' : 'files'} (total ${totalLines} lines; showing full navigation list):`,
+    '',
+  ];
+  for (let i = 0; i < matches.length; i++) {
+    const m = matches[i];
+    out.push(
+      `  - ${m.relPath}#${m.qualifiedName} [L${m.startLine}-L${m.endLine}] (${m.lineCount} lines) — ${m.signature}`
+    );
+  }
+  out.push('');
+  out.push(
+    'Tip: Specify a file path (e.g. tokless slice <file>#<symbol>) or pass --all to expand all matches.'
+  );
+  return out.join('\n');
+}
+
+function formatDirectorySliceNotFound(rootDir, query, stats, suggestions) {
+  const oversizeNote =
+    stats.skippedOversizeFiles > 0 ? `, skipped ${stats.skippedOversizeFiles} oversize` : '';
+  const out = [
+    `Symbol "${query}" not found in directory ${rootDir} (scanned ${stats.scannedFiles} files${oversizeNote}).`,
+  ];
+  if (Array.isArray(suggestions) && suggestions.length > 0) {
+    out.push('');
+    out.push('Did you mean:');
+    for (let i = 0; i < suggestions.length; i++) {
+      const s = suggestions[i];
+      out.push(
+        `  - ${s.relPath}#${s.qualifiedName} [L${s.startLine}-L${s.endLine}] (${s.signature})`
+      );
+    }
+  }
+  return out.join('\n');
+}
+
+function searchDirectorySymbols(resolvedDir, rawQuery, options = {}) {
+  const t0 = performance.now();
+  const query = normalizeSymbolQuery(rawQuery, { isMarkdown: false });
+  const maxDepth = resolveMaxDepth(options, Infinity);
+  const maxFileBytes =
+    typeof options.maxFileBytes === 'number' && options.maxFileBytes > 0
+      ? options.maxFileBytes
+      : DEFAULT_MAX_FILE_BYTES;
+  const maxSuggestions =
+    Number.isInteger(options.maxSuggestions) && options.maxSuggestions > 0
+      ? options.maxSuggestions
+      : 5;
+  const needleLower = extractPrefilterNeedle(rawQuery);
+
+  let scannedFiles = 0;
+  let parsedFiles = 0;
+  let prefilterSkippedFiles = 0;
+  let skippedOversizeFiles = 0;
+  const oversizeFiles = [];
+  const skippedForPass2 = [];
+  const suggestionPool = [];
+
+  let bestTier = Infinity;
+  let bestMatches = [];
+
+  walkDirectory(resolvedDir, {
+    maxDepth,
+    exclude: options.exclude,
+    extensions: SUPPORTED_EXTS,
+    respectGitignore: options.respectGitignore,
+    onFile(entry) {
+      scannedFiles++;
+      let fileSize;
+      try {
+        fileSize = fs.statSync(entry.fullPath).size;
+      } catch (_) {
+        return;
+      }
+      if (fileSize > maxFileBytes) {
+        skippedOversizeFiles++;
+        oversizeFiles.push(entry.relPath);
+        return;
+      }
+
+      let content;
+      try {
+        content = fs.readFileSync(entry.fullPath, 'utf8');
+      } catch (_) {
+        return;
+      }
+
+      if (needleLower && !content.toLowerCase().includes(needleLower)) {
+        prefilterSkippedFiles++;
+        skippedForPass2.push(entry);
+        return;
+      }
+
+      parsedFiles++;
+      const lines = splitLines(content);
+      const rawItems = parseRawSkeletonItems(lines, entry.ext, options);
+      const qualifiedItems = buildQualifiedItems(rawItems, entry.ext);
+      const { tier, items } = matchQualifiedItemsWithTier(qualifiedItems, rawQuery, entry.ext);
+
+      if (items.length > 0) {
+        if (tier < bestTier) {
+          bestTier = tier;
+          bestMatches = [];
+        }
+        if (tier === bestTier) {
+          for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            bestMatches.push({
+              relPath: entry.relPath,
+              filePath: entry.fullPath,
+              ext: entry.ext,
+              kind: it.kind,
+              name: it.name,
+              qualifiedName: it.qualifiedName,
+              signature: it.signature,
+              startLine: it.startLine,
+              endLine: it.endLine,
+              lineCount: Math.max(0, it.endLine - it.startLine + 1),
+              depth: it.depth || 0,
+              ...(typeof it.level === 'number' ? { level: it.level } : {}),
+            });
+          }
+        }
+      } else if (bestMatches.length === 0 && qualifiedItems.length > 0) {
+        collectDirectorySuggestions(suggestionPool, query, qualifiedItems, entry);
+      }
+    },
+  });
+
+  if (bestMatches.length > 0) {
+    bestMatches.sort(
+      (a, b) =>
+        a.relPath.localeCompare(b.relPath) ||
+        a.startLine - b.startLine ||
+        (a.depth || 0) - (b.depth || 0)
+    );
+    const matchedFileCount = new Set(bestMatches.map((m) => m.relPath)).size;
+    const totalSliceLines = bestMatches.reduce((sum, m) => sum + m.lineCount, 0);
+    const elapsedMs = Number((performance.now() - t0).toFixed(2));
+    return {
+      found: true,
+      query,
+      matchTier: bestTier,
+      matches: bestMatches,
+      matchedFileCount,
+      totalSliceLines,
+      scannedFiles,
+      parsedFiles,
+      prefilterSkippedFiles,
+      skippedOversizeFiles,
+      oversizeFiles,
+      suggestions: [],
+      elapsedMs,
+    };
+  }
+
+  // 0-hit Pass 2: collect cross-file typo/rename suggestions without bloating the hit path
+  const probes = extractFuzzyProbes(rawQuery);
+  const unprobedFiles = [];
+  for (let i = 0; i < skippedForPass2.length; i++) {
+    const entry = skippedForPass2[i];
+    let content;
+    try {
+      content = fs.readFileSync(entry.fullPath, 'utf8');
+    } catch (_) {
+      continue;
+    }
+    const contentLower = content.toLowerCase();
+    if (probes.length === 0 || probes.some((p) => contentLower.includes(p))) {
+      const lines = splitLines(content);
+      const rawItems = parseRawSkeletonItems(lines, entry.ext, options);
+      const qualifiedItems = buildQualifiedItems(rawItems, entry.ext);
+      collectDirectorySuggestions(suggestionPool, query, qualifiedItems, entry);
+    } else {
+      unprobedFiles.push(entry);
+    }
+  }
+
+  if (suggestionPool.length === 0 && unprobedFiles.length > 0 && unprobedFiles.length <= 100) {
+    for (let i = 0; i < unprobedFiles.length; i++) {
+      const entry = unprobedFiles[i];
+      let content;
+      try {
+        content = fs.readFileSync(entry.fullPath, 'utf8');
+      } catch (_) {
+        continue;
+      }
+      const lines = splitLines(content);
+      const rawItems = parseRawSkeletonItems(lines, entry.ext, options);
+      const qualifiedItems = buildQualifiedItems(rawItems, entry.ext);
+      collectDirectorySuggestions(suggestionPool, query, qualifiedItems, entry);
+    }
+  }
+
+  const suggestions = finalizeDirectorySuggestions(suggestionPool, maxSuggestions);
+  const elapsedMs = Number((performance.now() - t0).toFixed(2));
+  return {
+    found: false,
+    query,
+    matchTier: null,
+    matches: [],
+    matchedFileCount: 0,
+    totalSliceLines: 0,
+    scannedFiles,
+    parsedFiles,
+    prefilterSkippedFiles,
+    skippedOversizeFiles,
+    oversizeFiles,
+    suggestions,
+    elapsedMs,
+  };
+}
+
+function locateDirectorySymbol(resolvedDir, rawQuery, options = {}) {
+  const res = searchDirectorySymbols(resolvedDir, rawQuery, options);
+  return {
+    scope: 'directory',
+    ok: res.found,
+    found: res.found,
+    root: resolvedDir,
+    dirPath: resolvedDir,
+    query: res.query,
+    matchTier: res.matchTier,
+    matchCount: res.matches.length,
+    matchedFileCount: res.matchedFileCount,
+    totalSliceLines: res.totalSliceLines,
+    scannedFiles: res.scannedFiles,
+    parsedFiles: res.parsedFiles,
+    prefilterSkippedFiles: res.prefilterSkippedFiles,
+    skippedOversizeFiles: res.skippedOversizeFiles,
+    oversizeFiles: res.oversizeFiles,
+    matches: res.matches,
+    ...(res.found ? {} : { suggestions: res.suggestions }),
+    elapsedMs: res.elapsedMs,
+  };
+}
+
+function sliceDirectorySymbol(resolvedDir, rawQuery, options = {}) {
+  const t0 = performance.now();
+  const res = searchDirectorySymbols(resolvedDir, rawQuery, options);
+  const lineNumbers = Boolean(options.lineNumbers);
+  const expandAll = Boolean(options.all);
+  const maxInlineMatches =
+    Number.isInteger(options.maxInlineMatches) && options.maxInlineMatches >= 1
+      ? options.maxInlineMatches
+      : DEFAULT_MAX_INLINE_MATCHES;
+  const maxInlineLines =
+    Number.isInteger(options.maxInlineLines) && options.maxInlineLines >= 1
+      ? options.maxInlineLines
+      : DEFAULT_MAX_INLINE_LINES;
+
+  if (!res.found) {
+    const formatted = formatDirectorySliceNotFound(
+      resolvedDir,
+      res.query || String(rawQuery ?? ''),
+      res,
+      res.suggestions
+    );
+    const elapsedMs = Number((performance.now() - t0).toFixed(2));
+    return {
+      mode: 'slice',
+      scope: 'directory',
+      ok: false,
+      found: false,
+      root: resolvedDir,
+      dirPath: resolvedDir,
+      query: res.query,
+      displayMode: 'not_found',
+      expanded: false,
+      matchTier: null,
+      matchCount: 0,
+      matchedFileCount: 0,
+      totalSliceLines: 0,
+      scannedFiles: res.scannedFiles,
+      parsedFiles: res.parsedFiles,
+      prefilterSkippedFiles: res.prefilterSkippedFiles,
+      skippedOversizeFiles: res.skippedOversizeFiles,
+      oversizeFiles: res.oversizeFiles,
+      matches: [],
+      suggestions: res.suggestions,
+      elapsedMs,
+      formatted,
+      text: formatted,
+    };
+  }
+
+  const shouldExpand =
+    expandAll ||
+    res.matches.length === 1 ||
+    (res.matches.length <= maxInlineMatches && res.totalSliceLines <= maxInlineLines);
+
+  if (shouldExpand) {
+    const fileLinesCache = new Map();
+    const expandedMatches = res.matches.map((m) => {
+      let lines = fileLinesCache.get(m.filePath);
+      if (!lines) {
+        const content = fs.readFileSync(m.filePath, 'utf8');
+        lines = splitLines(content);
+        fileLinesCache.set(m.filePath, lines);
+      }
+      return {
+        ...m,
+        content: formatSliceLines(lines, m.startLine, m.endLine, lineNumbers),
+      };
+    });
+
+    const formatted = formatDirectorySliceExpanded(expandedMatches, res.query);
+    const elapsedMs = Number((performance.now() - t0).toFixed(2));
+    return {
+      mode: 'slice',
+      scope: 'directory',
+      ok: true,
+      found: true,
+      root: resolvedDir,
+      dirPath: resolvedDir,
+      query: res.query,
+      displayMode: 'expanded',
+      expanded: true,
+      matchTier: res.matchTier,
+      matchCount: expandedMatches.length,
+      matchedFileCount: res.matchedFileCount,
+      totalSliceLines: res.totalSliceLines,
+      scannedFiles: res.scannedFiles,
+      parsedFiles: res.parsedFiles,
+      prefilterSkippedFiles: res.prefilterSkippedFiles,
+      skippedOversizeFiles: res.skippedOversizeFiles,
+      oversizeFiles: res.oversizeFiles,
+      matches: expandedMatches,
+      elapsedMs,
+      formatted,
+      text: formatted,
+    };
+  }
+
+  const formatted = formatDirectorySliceList(res.matches, res.query);
+  const elapsedMs = Number((performance.now() - t0).toFixed(2));
+  return {
+    mode: 'slice',
+    scope: 'directory',
+    ok: true,
+    found: true,
+    root: resolvedDir,
+    dirPath: resolvedDir,
+    query: res.query,
+    displayMode: 'list',
+    expanded: false,
+    matchTier: res.matchTier,
+    matchCount: res.matches.length,
+    matchedFileCount: res.matchedFileCount,
+    totalSliceLines: res.totalSliceLines,
+    scannedFiles: res.scannedFiles,
+    parsedFiles: res.parsedFiles,
+    prefilterSkippedFiles: res.prefilterSkippedFiles,
+    skippedOversizeFiles: res.skippedOversizeFiles,
+    oversizeFiles: res.oversizeFiles,
+    matches: res.matches,
+    elapsedMs,
+    formatted,
+    text: formatted,
+  };
+}
+
 function locateSymbol(filePathOrTarget, symbolQuery, options = {}) {
   const parsed = parseSliceTarget(filePathOrTarget, symbolQuery);
   if (!parsed.filePath) {
-    throw new Error('Missing target file path for symbol lookup.');
+    throw new Error('Missing target path for symbol lookup.');
   }
   const resolved = path.resolve(parsed.filePath);
   if (!fs.existsSync(resolved)) {
-    throw new Error(`Target file does not exist: ${resolved}`);
+    throw new Error(`Target path does not exist: ${resolved}`);
   }
   const stat = fs.statSync(resolved);
+  if (stat.isDirectory()) {
+    if (!parsed.symbol) {
+      throw new Error(
+        'Missing symbol query. Pass "<dir>#<symbol>" or provide a symbol argument.'
+      );
+    }
+    return locateDirectorySymbol(resolved, parsed.symbol, options);
+  }
   if (!stat.isFile()) {
-    throw new Error(`Symbol lookup requires a file path, got directory: ${resolved}`);
+    throw new Error(`Unsupported target type for symbol lookup: ${resolved}`);
   }
 
   const content = fs.readFileSync(resolved, 'utf8');
@@ -789,20 +1296,23 @@ function locateSymbol(filePathOrTarget, symbolQuery, options = {}) {
 function sliceSymbol(filePathOrTarget, symbolQuery, options = {}) {
   const parsed = parseSliceTarget(filePathOrTarget, symbolQuery);
   if (!parsed.filePath) {
-    throw new Error('Missing target file path for symbol slice.');
+    throw new Error('Missing target path for symbol slice.');
   }
   if (!parsed.symbol) {
     throw new Error(
-      'Missing symbol query. Pass "<file>#<symbol>" or provide a symbol argument.'
+      'Missing symbol query. Pass "<file-or-dir>#<symbol>" or provide a symbol argument.'
     );
   }
   const resolved = path.resolve(parsed.filePath);
   if (!fs.existsSync(resolved)) {
-    throw new Error(`Target file does not exist: ${resolved}`);
+    throw new Error(`Target path does not exist: ${resolved}`);
   }
   const stat = fs.statSync(resolved);
+  if (stat.isDirectory()) {
+    return sliceDirectorySymbol(resolved, parsed.symbol, options);
+  }
   if (!stat.isFile()) {
-    throw new Error(`Symbol slice requires a file path, got directory: ${resolved}`);
+    throw new Error(`Unsupported target type for symbol slice: ${resolved}`);
   }
 
   const content = fs.readFileSync(resolved, 'utf8');
@@ -819,6 +1329,7 @@ module.exports = {
   parseSliceTarget,
   buildQualifiedItems,
   matchQualifiedItems,
+  matchQualifiedItemsWithTier,
   rankSymbolSuggestions,
   locateSymbol,
   sliceSymbol,

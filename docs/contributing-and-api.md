@@ -10,9 +10,10 @@
 
 ```js
 const {
-  generateSkeleton,        // 自动识别文件或目录生成 [L起-L止] 骨架（支持 depth / exclude / map / symbol）
-  sliceSymbol,             // 按函数/类方法/章节名精准切片源码（抗并发编辑行号漂移，未命中返回候选建议与骨架）
-  locateSymbol,            // 定位符号当前起止行号区间（不拉取全文内容）
+  generateSkeleton,        // 自动识别文件或目录生成 [L起-L止] 骨架（支持 depth / exclude / map / symbol / respectGitignore）
+  sliceSymbol,             // 按符号/类方法/章节名精准切片源码，支持单文件与跨目录（选项: lineNumbers / depth / exclude / all / respectGitignore）
+  locateSymbol,            // 定位单文件或跨目录符号当前起止行号区间（支持 depth / exclude / respectGitignore，不拉取源码正文）
+  walkDirectory,           // 共用目录遍历器（遵守 .gitignore 分层过滤与显式指向忽略目录穿透放行，支持 depth / exclude / extensions / respectGitignore）
   evaluateReadGuard,       // 纯函数评估 Antigravity / Claude Code 读取请求是否无行号盲读
   listSessions,            // 列出本地 Antigravity 会话（支持 source: 'cli' | 'app' | 'ide' | 'all'）
   analyzeSession,          // 解析单次会话账单、模型切换缓存断层与峰值水位（支持 'latest'）
@@ -20,15 +21,21 @@ const {
   auditProject,            // 透视项目常驻规则、Skill 与 MCP / 工具底座 Token 账单
 } = require('tokless');
 
-// 1. 提取目录或单文件骨架（支持自定义排除目录）
+// 1. 提取目录或单文件骨架（自动遵守 .gitignore，支持自定义排除目录）
 const skel = generateSkeleton('./src', { depth: 2, exclude: ['third_party', 'vendor'] });
 console.log(skel.formatted);
 
-// 2. 按符号/类方法/章节名精准切片源码（支持 "<file>#<symbol>" 或独立 symbol 参数）
-const slice = sliceSymbol('./src/server.ts#Server.start', undefined, { lineNumbers: true });
-console.log(slice.formatted);
+// 2. 按符号/类方法/章节名精准切片或定位（支持单文件或目录 "<file-or-dir>#<symbol>" 及独立 symbol 参数）
+const fileSlice = sliceSymbol('./src/server.ts#Server.start', undefined, { lineNumbers: true });
+const dirSlice = sliceSymbol('./src#Server.start', undefined, { depth: 4, exclude: ['fixtures'], all: false, lineNumbers: true });
+const located = locateSymbol('./src', 'Server.start', { depth: 4, exclude: ['fixtures'] });
+console.log(fileSlice.formatted, dirSlice.formatted, located.matches);
 
-// 3. 进程内调用防盲读判定（支持 Antigravity 与 Claude Code 载荷格式）
+// 3. 复用共用目录遍历器（自动读取各层 .gitignore，显式指向忽略目录时自动放行）
+const walked = walkDirectory('./src', { depth: 3, exclude: ['fixtures'], respectGitignore: true });
+// walked => { root, maxDepth, gitRoot, penetrated, files }
+
+// 4. 进程内调用防盲读判定（支持 Antigravity 与 Claude Code 载荷格式）
 const verdict = evaluateReadGuard({
   tool_name: 'Read',
   tool_input: { file_path: './src/large-module.ts' },

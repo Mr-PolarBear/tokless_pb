@@ -1,7 +1,7 @@
 {
   "name": "agy-tokless",
   "displayName": "AGY Tokless — Antigravity 省流护栏与账单透视套件",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "专为 AI 编程打造的省流导航与账单审计插件：提供代码语法骨架提取（repo-skeleton）、可选超大文件盲读骨架导航钩子（PreToolUse Hook，--with-guard 启用）、轻量净身角色模板（agents）以及 Prefix Cache 断层与 MCP 底座税体检工具（agy-audit）。",
   "disabled": false,
   "suggestedPrompts": [

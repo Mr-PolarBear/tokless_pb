@@ -10,9 +10,10 @@
 
 ```js
 const {
-  generateSkeleton,        // File or directory [Lstart-Lend] map (supports depth / exclude / map / symbol)
-  sliceSymbol,             // Drift-proof source slice by function/method/section name (with typo fallback)
-  locateSymbol,            // Resolve live [startLine, endLine] metadata for a symbol without body text
+  generateSkeleton,        // File or directory [Lstart-Lend] map (supports depth / exclude / map / symbol / respectGitignore)
+  sliceSymbol,             // Drift-proof source slice by symbol/method/section across a file or directory (lineNumbers / depth / exclude / all / respectGitignore)
+  locateSymbol,            // Resolve live [startLine, endLine] metadata across a file or directory without body text (depth / exclude / respectGitignore)
+  walkDirectory,           // Shared directory walker with layered .gitignore rules and explicit ignored-dir penetration (depth / exclude / extensions / respectGitignore)
   evaluateReadGuard,       // Pure validator for Antigravity / Claude Code PreToolUse payloads
   listSessions,            // List recent Antigravity sessions (source: 'cli' | 'app' | 'ide' | 'all')
   analyzeSession,          // Dissect session billing, model-switch cache cliffs & peak context ('latest')
@@ -20,15 +21,21 @@ const {
   auditProject,            // Inspect project rules, skills & MCP/tool schema base token costs
 } = require('tokless');
 
-// 1. Extract [Lstart-Lend] map for a directory with custom excludes
+// 1. Extract [Lstart-Lend] map for a directory with .gitignore support and custom excludes
 const skel = generateSkeleton('./src', { depth: 2, exclude: ['third_party', 'vendor'] });
 console.log(skel.formatted);
 
-// 2. Slice exact function/class method/Markdown section by symbol name
-const slice = sliceSymbol('./src/server.ts#Server.start', undefined, { lineNumbers: true });
-console.log(slice.formatted);
+// 2. Slice or locate symbols in a single file or across a directory ("<file-or-dir>#<symbol>" or separate symbol arg)
+const fileSlice = sliceSymbol('./src/server.ts#Server.start', undefined, { lineNumbers: true });
+const dirSlice = sliceSymbol('./src#Server.start', undefined, { depth: 4, exclude: ['fixtures'], all: false, lineNumbers: true });
+const located = locateSymbol('./src', 'Server.start', { depth: 4, exclude: ['fixtures'] });
+console.log(fileSlice.formatted, dirSlice.formatted, located.matches);
 
-// 3. Evaluate PreToolUse payloads in memory
+// 3. Reuse the shared directory walker (layered .gitignore rules + auto-penetration on explicit ignored targets)
+const walked = walkDirectory('./src', { depth: 3, exclude: ['fixtures'], respectGitignore: true });
+// => { root, maxDepth, gitRoot, penetrated, files }
+
+// 4. Evaluate PreToolUse payloads in memory
 const verdict = evaluateReadGuard({
   tool_name: 'Read',
   tool_input: { file_path: './src/large-module.ts' },

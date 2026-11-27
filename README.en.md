@@ -25,7 +25,7 @@
 
 `tokless` is a **zero-dependency Node.js (`>=18`)** token optimizer and local billing inspector built for AI coding agents (one-command native setup for **Google Antigravity**, **Claude Code**, and **Codex CLI**, plus universal CLI/rules for Cursor, Windsurf, Cline, Roo Code, and others):
 
-1. **Stop Blind-Read Bloat (`tokless skeleton` / `tokless slice`)**: Semantic search (`@Codebase`) finds files, not line ranges—agents still lazily read entire 1,500-line files into context, compounding `Cache Read` costs on every subsequent turn. `tokless` extracts function/class/macro/typedef signatures with exact **`[Lstart-Lend]` line ranges** in milliseconds and slices functions, class methods, or Markdown sections directly by symbol name (**85%~97% exploration savings**).
+1. **Stop Blind-Read Bloat (`tokless skeleton` / `tokless slice`)**: Semantic search (`@Codebase`) finds files, not line ranges—agents still lazily read entire 1,500-line files into context, compounding `Cache Read` costs on every subsequent turn. `tokless` extracts function/class/macro/typedef signatures with exact **`[Lstart-Lend]` line ranges** in milliseconds and slices functions, class methods, or Markdown sections directly by symbol name across a single file or whole directory (**85%~97% exploration savings**).
 2. **Strip Idle MCP Base Tax (`tokless-coder` / `tokless-reviewer`)**: Lean roles with `inheritMcp: false` strip unused external MCP and tool schemas during pure coding or read-only review sessions.
 3. **Inspect Real Token Bills Offline (`tokless audit`)**: Dissect Top 5 costliest steps, Prefix Cache cliffs (including Orchestrator/dual-model switches and idle expirations), and project rule/MCP base overhead at **0 LLM tokens**.
 
@@ -87,9 +87,10 @@ Please run `npx tokless install` to enable tokless and confirm that the skills a
 ```bash
 # 1. Code skeletons & symbol slicing (lazy-loads JS/TS, Vue/Svelte, Python, Go, Rust, Java, Kotlin, C/C++, C#, Markdown)
 npx tokless skeleton . --map                                    # Fast repo file line/char overview
-npx tokless skeleton ./src --depth 3 --exclude third_party      # Directory [Lstart-Lend] signature map
+npx tokless skeleton ./src --depth 3 --exclude third_party      # Directory [Lstart-Lend] map (respects .gitignore; explicit ignored-dir targets auto-penetrate)
 npx tokless skeleton ./driver/hal_uart.c                        # Single file or large C/C++ header skeleton
-npx tokless slice ./src/server.ts#Server.start --line-numbers   # Drift-proof slice by symbol/method/section (with typo suggestions)
+npx tokless slice ./src/server.ts#Server.start --line-numbers   # Single-file drift-proof slice by symbol/method/section (with typo suggestions)
+npx tokless slice ./src#Server.start --line-numbers             # Cross-directory symbol slice (supports --depth / --exclude / --all for multi-hit expansion)
 
 # 2. Offline 0-LLM-token billing & base-tax audits
 npx tokless audit project .                                     # [Universal] Inspect Always-On rules, skills & MCP base costs

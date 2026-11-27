@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const { estimateTokens, splitLines, formatInt } = require('./core/lexer');
 const { SUPPORTED_EXTS, getLanguageHandler } = require('./core/registry');
+const { IGNORED_DIRS, resolveMaxDepth, walkDirectory } = require('./core/dir-walker');
 const {
   parseSliceTarget,
   buildQualifiedItems,
@@ -11,23 +12,6 @@ const {
   sliceSymbol,
   sliceSymbolFromText,
 } = require('./symbol-slice');
-
-const IGNORED_DIRS = new Set([
-  'node_modules',
-  '.git',
-  'dist',
-  'build',
-  'exports',
-  '.next',
-  'target',
-  '__pycache__',
-  'Objects',
-  'Listings',
-  '.cache',
-  '.clangd',
-  '.vs',
-  '.idea',
-]);
 
 function formatSkeletonItems(result, options = {}) {
   const { includeHeader = false } = options;
@@ -118,75 +102,35 @@ function scanFileLightweight(filePath) {
 
 function scanDirectorySkeleton(dirPath, options = {}) {
   const isMap = Boolean(options.map);
-  const explicitMaxDepth =
-    Number.isInteger(options.maxDepth) && options.maxDepth >= 0
-      ? options.maxDepth
-      : Number.isInteger(options.depth) && options.depth >= 0
-      ? options.depth
-      : null;
-  const maxDepth = explicitMaxDepth !== null ? explicitMaxDepth : isMap ? 8 : 2;
-  const extraExclude = new Set();
-  if (Array.isArray(options.exclude) || options.exclude instanceof Set) {
-    for (const item of options.exclude) {
-      if (typeof item === 'string' && item.trim()) extraExclude.add(item.trim());
-    }
-  } else if (typeof options.exclude === 'string' && options.exclude.trim()) {
-    for (const part of options.exclude.split(',')) {
-      if (part.trim()) extraExclude.add(part.trim());
-    }
-  }
+  const maxDepth = resolveMaxDepth(options, isMap ? 8 : 2);
   const root = path.resolve(dirPath);
   const files = [];
 
-  function walk(currentDir, currentDepth) {
-    let entries;
-    try {
-      entries = fs.readdirSync(currentDir, { withFileTypes: true });
-    } catch (_) {
-      return;
-    }
-
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        if (
-          IGNORED_DIRS.has(entry.name) ||
-          entry.name.startsWith('cmake-build-') ||
-          extraExclude.has(entry.name)
-        ) {
-          continue;
+  walkDirectory(root, {
+    maxDepth,
+    exclude: options.exclude,
+    extensions: SUPPORTED_EXTS,
+    respectGitignore: options.respectGitignore,
+    onFile(entry) {
+      try {
+        if (isMap) {
+          const statItem = scanFileLightweight(entry.fullPath);
+          files.push({
+            relPath: entry.relPath,
+            ...statItem,
+          });
+        } else {
+          const skel = generateFileSkeleton(entry.fullPath, { includeHeader: false });
+          files.push({
+            relPath: entry.relPath,
+            ...skel,
+          });
         }
-        if (currentDepth < maxDepth) {
-          walk(path.join(currentDir, entry.name), currentDepth + 1);
-        }
-      } else if (entry.isFile()) {
-        const ext = path.extname(entry.name).toLowerCase();
-        if (!SUPPORTED_EXTS.has(ext)) continue;
-        const fullPath = path.join(currentDir, entry.name);
-        try {
-          const relPath = path.relative(root, fullPath).replace(/\\/g, '/');
-          if (isMap) {
-            const statItem = scanFileLightweight(fullPath);
-            files.push({
-              relPath,
-              ...statItem,
-            });
-          } else {
-            const skel = generateFileSkeleton(fullPath, { includeHeader: false });
-            files.push({
-              relPath,
-              ...skel,
-            });
-          }
-        } catch (_) {
-          // 陷阱: 遇到无权限或损坏软链单文件时静默跳过，防止中断整个仓库目录树遍历
-        }
+      } catch (_) {
+        // 陷阱: 遇到无权限或损坏软链单文件时静默跳过，防止中断整个仓库目录树遍历
       }
-    }
-  }
-
-  walk(root, 0);
+    },
+  });
 
   let totalLines = 0;
   let totalChars = 0;
@@ -366,6 +310,7 @@ function generateSkeleton(targetPath, options = {}) {
 module.exports = {
   IGNORED_DIRS,
   SUPPORTED_EXTS,
+  walkDirectory,
   estimateTokens,
   scanFileLightweight,
   generateFileSkeleton,

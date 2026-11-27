@@ -49,6 +49,7 @@ module.exports = {
   readGuard,
   IGNORED_DIRS: skeleton.IGNORED_DIRS,
   SUPPORTED_EXTS: skeleton.SUPPORTED_EXTS,
+  walkDirectory: skeleton.walkDirectory,
   scanFileLightweight: skeleton.scanFileLightweight,
   generateFileSkeleton: skeleton.generateFileSkeleton,
   scanDirectorySkeleton: skeleton.scanDirectorySkeleton,
